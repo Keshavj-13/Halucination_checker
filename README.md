@@ -3,16 +3,17 @@
 A minimal, clean starter project for auditing documents for hallucinations.
 
 ## Project Structure
+...
+## LLM Configuration
 
-- `backend/`: FastAPI server
-  - `main.py`: Entry point
-  - `routes/audit.py`: API endpoints
-  - `services/`: Claim extraction and verification logic
-  - `models/schemas.py`: Pydantic data models
-- `frontend/`: React + Vite + Tailwind CSS dashboard
-  - `src/App.jsx`: Main UI
-  - `src/api.js`: Backend communication with fallback logic
-  - `src/components/`: Reusable UI components
+This system uses LLMs for atomic claim extraction and verification. It supports **Ollama** (local) and **OpenAI** (API).
+
+1. Copy the example env file:
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
+2. Edit `backend/.env` to choose your provider and set your API key if using OpenAI.
+3. If using Ollama, ensure it is running (`ollama serve`) and you have the model pulled (`ollama pull llama3`).
 
 ## Setup and Run
 

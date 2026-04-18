@@ -18,8 +18,13 @@ echo "------------------------------------------"
 # Start backend
 echo "🚀 Starting FastAPI backend on http://localhost:8000"
 cd backend
-# Ensure dependencies are installed (optional but helpful)
-# pip install -r requirements.txt
+
+# Check for venv or just install requirements
+if [ -f "requirements.txt" ]; then
+    echo "📦 Checking Python dependencies..."
+    pip install -r requirements.txt > /dev/null 2>&1
+fi
+
 uvicorn main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 
