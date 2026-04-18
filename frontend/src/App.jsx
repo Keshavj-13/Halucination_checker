@@ -10,6 +10,7 @@ function App() {
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState("");
     const [selectedClaim, setSelectedClaim] = useState(null);
+    const [isDragOver, setIsDragOver] = useState(false);
 
     const handleAudit = async () => {
         if (!document.trim()) return;
@@ -58,6 +59,69 @@ function App() {
         setSelectedClaim(null);
     };
 
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragOver(true);
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+    };
+
+    const handleDrop = async (e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            const file = files[0];
+            // Accept any file that might contain text
+            await processFile(file);
+        }
+    };
+
+    const processFile = async (file) => {
+        setLoading(true);
+        setData({ claims: [], total: 0, verified: 0, plausible: 0, hallucinations: 0 });
+        setStatus("Processing file...");
+        setSelectedClaim(null);
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            await runAuditStream(formData, (update) => {
+                if (update.type === "start") {
+                    setData(prev => ({ ...prev, total: update.total }));
+                    setStatus(`Verifying ${update.total} claims...`);
+                } else if (update.type === "claim") {
+                    setData(prev => {
+                        const newClaims = [...prev.claims, update.claim];
+                        const verified = newClaims.filter(c => c.status === "Verified").length;
+                        const plausible = newClaims.filter(c => c.status === "Plausible").length;
+                        const hallucinations = newClaims.filter(c => c.status === "Hallucination").length;
+                        return {
+                            ...prev,
+                            claims: newClaims,
+                            verified,
+                            plausible,
+                            hallucinations
+                        };
+                    });
+                } else if (update.type === "done") {
+                    setLoading(false);
+                    setStatus("");
+                } else if (update.type === "error") {
+                    setLoading(false);
+                    setStatus("Error: " + update.message);
+                }
+            });
+        } catch (error) {
+            setLoading(false);
+            setStatus("Error processing file: " + error.message);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-8">
             <header className="max-w-7xl mx-auto mb-8 flex items-center justify-between">
@@ -87,10 +151,15 @@ function App() {
                 {/* Input & Viewer Column */}
                 <div className="lg:col-span-8 space-y-6">
                     {!data || data.claims.length === 0 ? (
-                        <div className="bg-gray-900 rounded-2xl p-6 shadow-xl border border-gray-800">
+                        <div 
+                            className={`bg-gray-900 rounded-2xl p-6 shadow-xl border transition-all ${isDragOver ? 'border-blue-500 bg-gray-800' : 'border-gray-800'}`}
+                            onDragOver={handleDragOver}
+                            onDragLeave={handleDragLeave}
+                            onDrop={handleDrop}
+                        >
                             <textarea
                                 className="w-full h-64 bg-gray-950 text-gray-100 p-6 rounded-xl border border-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none text-lg font-serif leading-relaxed"
-                                placeholder="Paste your document here to begin the audit..."
+                                placeholder="Paste your document here or drop any text file (PDF, DOCX, TXT, etc.) to begin the audit..."
                                 value={document}
                                 onChange={(e) => setDocument(e.target.value)}
                             />

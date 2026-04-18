@@ -19,22 +19,33 @@ This system uses LLMs for atomic claim extraction and verification. It supports 
 
 ### The Quick Way (Single Command)
 
-If you have both Python and Node.js installed, you can start both services with:
+#### Linux/macOS
 ```bash
 ./start.sh
+```
+
+#### Windows
+```cmd
+start.cmd
 ```
 
 ### The Manual Way
 
 #### Backend
 1. Navigate to the backend directory: `cd backend`
-2. Install dependencies: `pip install -r requirements.txt`
-3. Run the server: `uvicorn main:app --reload`
+2. Install dependencies: `py -m pip install -r requirements.txt`
+3. Run the server: `py -m uvicorn main:app --reload`
 
 #### Frontend
 1. Navigate to the frontend directory: `cd frontend`
-2. Install dependencies: `npm install`
-3. Run the development server: `npm run dev`
+2. Install dependencies:
+   - In PowerShell: `npm.cmd install`
+   - Or: `cmd /c "npm install"`
+3. Run the development server:
+   - In PowerShell: `npm.cmd run dev`
+   - Or: `cmd /c "npm run dev"`
+
+If PowerShell blocks `npm`, use `npm.cmd` or `cmd /c`.
 
 ## Features
 

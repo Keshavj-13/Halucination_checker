@@ -33,13 +33,23 @@ export async function runAudit(document) {
     return data ?? FALLBACK;
 }
 
-export async function runAuditStream(document, onUpdate) {
+export async function runAuditStream(input, onUpdate) {
+    const isFile = input instanceof FormData;
+    const url = isFile ? `${BASE}/audit/upload/stream` : `${BASE}/audit/stream`;
+    
+    const options = {
+        method: "POST",
+    };
+    
+    if (isFile) {
+        options.body = input;  // FormData
+    } else {
+        options.headers = { "Content-Type": "application/json" };
+        options.body = JSON.stringify({ document: input });
+    }
+
     try {
-        const response = await fetch(`${BASE}/audit/stream`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ document }),
-        });
+        const response = await fetch(url, options);
 
         if (!response.ok) throw new Error("Stream failed");
 
