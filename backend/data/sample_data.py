@@ -2,11 +2,20 @@ from models.schemas import AuditResponse, Claim, Evidence
 
 # Pre-built sample audit response used by GET /sample
 SAMPLE_RESPONSE = AuditResponse(
+    document=(
+        "The Earth orbits the Sun at an average distance of 93 million miles. "
+        "Python is the best programming language and always outperforms every other language. "
+        "Machine learning models can improve over time with more data. "
+        "The human brain contains approximately 86 billion neurons. "
+        "Renewable energy is always cheaper than fossil fuels in every region."
+    ),
     claims=[
         Claim(
             text="The Earth orbits the Sun at an average distance of 93 million miles.",
             status="Verified",
             confidence=0.92,
+            start_idx=0,
+            end_idx=68,
             evidence=[
                 Evidence(
                     title="NASA Solar System Exploration",
@@ -26,6 +35,8 @@ SAMPLE_RESPONSE = AuditResponse(
             text="Python is the best programming language and always outperforms every other language.",
             status="Hallucination",
             confidence=0.81,
+            start_idx=69,
+            end_idx=153,
             evidence=[
                 Evidence(
                     title="Stack Overflow Developer Survey 2023",
@@ -39,6 +50,8 @@ SAMPLE_RESPONSE = AuditResponse(
             text="Machine learning models can improve over time with more data.",
             status="Plausible",
             confidence=0.74,
+            start_idx=154,
+            end_idx=215,
             evidence=[
                 Evidence(
                     title="Google AI Blog – Scaling Laws",
@@ -52,6 +65,8 @@ SAMPLE_RESPONSE = AuditResponse(
             text="The human brain contains approximately 86 billion neurons.",
             status="Verified",
             confidence=0.89,
+            start_idx=216,
+            end_idx=274,
             evidence=[
                 Evidence(
                     title="Azevedo et al., 2009 – Journal of Comparative Neurology",
@@ -65,6 +80,8 @@ SAMPLE_RESPONSE = AuditResponse(
             text="Renewable energy is always cheaper than fossil fuels in every region.",
             status="Hallucination",
             confidence=0.77,
+            start_idx=275,
+            end_idx=344,
             evidence=[
                 Evidence(
                     title="IEA Renewables Report 2023",

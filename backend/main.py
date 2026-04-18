@@ -28,6 +28,11 @@ app.add_middleware(
 app.include_router(router)
 
 
+@app.get("/")
+def root():
+    return {"message": "Hallucination Audit API is running. Use /audit or /audit/stream."}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

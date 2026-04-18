@@ -1,60 +1,59 @@
 import logging
-from typing import List, Dict
+import os
+import httpx
+from typing import List
 from models.schemas import Evidence
 
 logger = logging.getLogger("audit-api.search")
 
 class SearchService:
-    """
-    Service to fetch context for claims. 
-    Currently uses a high-quality mock, but structured for real API integration.
-    """
-    
+    def __init__(self):
+        self.tavily_key = os.getenv("TAVILY_API_KEY")
+        self.use_real_search = bool(self.tavily_key)
+
     async def search(self, query: str) -> List[Evidence]:
-        logger.info(f"Searching for: {query}")
-        
-        # In a real implementation, you would call Tavily, Serper, or Google Search here.
-        # For now, we simulate a high-quality search result.
-        
-        # Simple keyword-based mock results
+        if self.use_real_search:
+            return await self._tavily_search(query)
+        return await self._mock_search(query)
+
+    async def _tavily_search(self, query: str) -> List[Evidence]:
+        logger.info(f"Tavily Search: {query}")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": self.tavily_key,
+                        "query": query,
+                        "search_depth": "basic",
+                        "max_results": 3
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                results = []
+                for res in data.get("results", []):
+                    results.append(Evidence(
+                        title=res.get("title", "Web Source"),
+                        snippet=res.get("content", ""),
+                        url=res.get("url", ""),
+                        support="supporting" # Default to supporting, LLM will decide
+                    ))
+                return results
+        except Exception as e:
+            logger.error(f"Tavily search failed: {str(e)}")
+            return await self._mock_search(query)
+
+    async def _mock_search(self, query: str) -> List[Evidence]:
+        logger.info(f"Mock Search: {query}")
         lower_query = query.lower()
         
         if "earth" in lower_query and "orbit" in lower_query:
-            return [
-                Evidence(
-                    title="NASA Solar System Exploration",
-                    snippet="Earth orbits the Sun at an average distance of about 93 million miles (150 million kilometers).",
-                    url="https://solarsystem.nasa.gov/planets/earth/overview/",
-                    support="supporting"
-                )
-            ]
-        elif "python" in lower_query and "best" in lower_query:
-            return [
-                Evidence(
-                    title="Stack Overflow Developer Survey",
-                    snippet="Python remains one of the most popular languages, but 'best' is subjective and depends on the use case.",
-                    url="https://survey.stackoverflow.co/",
-                    support="weak"
-                )
-            ]
+            return [Evidence(title="NASA", snippet="Earth orbits the Sun at 93m miles.", url="https://nasa.gov", support="supporting")]
         elif "brain" in lower_query and "neuron" in lower_query:
-            return [
-                Evidence(
-                    title="Nature Neuroscience",
-                    snippet="The human brain is estimated to contain approximately 86 billion neurons, according to recent isotropic fractionator studies.",
-                    url="https://www.nature.com/articles/nn.2290",
-                    support="supporting"
-                )
-            ]
+            return [Evidence(title="Nature", snippet="The brain has 86 billion neurons.", url="https://nature.com", support="supporting")]
         
-        # Generic fallback
-        return [
-            Evidence(
-                title="General Knowledge Source",
-                snippet=f"Information related to '{query}' suggests varying levels of support depending on the specific context.",
-                url="https://example.com/search",
-                support="supporting"
-            )
-        ]
+        return [Evidence(title="General Source", snippet=f"Information about {query}...", url="#", support="supporting")]
 
 search_service = SearchService()
