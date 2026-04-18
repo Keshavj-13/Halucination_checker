@@ -1,38 +1,53 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from models.schemas import AuditRequest, AuditResponse
 from services.claim_extractor import extract_claims
-from services.verifier import verify_claims
+from services.verifier import verify_claims, verify_claims_stream
 from data.sample_data import SAMPLE_RESPONSE
 import logging
+from fastapi.responses import StreamingResponse
+import json
 
+router = APIRouter(prefix="/audit", tags=["audit"])
 logger = logging.getLogger("audit-api.routes")
-router = APIRouter()
 
-
-@router.post("/audit", response_model=AuditResponse)
+@router.post("/", response_model=AuditResponse)
 async def run_audit(body: AuditRequest):
-    logger.info(f"Received audit request for document (length: {len(body.document)})")
+    logger.info(f"Received audit request for document length: {len(body.document)}")
     
-    # Now using async services
-    claims = await extract_claims(body.document)
-    logger.info(f"Extracted {len(claims)} claims")
+    # 1. Extract Claims (with indices)
+    claims_data = await extract_claims(body.document)
     
-    verified_claims = await verify_claims(claims)
+    # 2. Verify Claims (Multilayer)
+    verified_claims = await verify_claims(claims_data)
     
-    verified = sum(1 for c in verified_claims if c.status == "Verified")
-    plausible = sum(1 for c in verified_claims if c.status == "Plausible")
-    hallucinations = sum(1 for c in verified_claims if c.status == "Hallucination")
-
-    logger.info(f"Audit complete: {verified} verified, {plausible} plausible, {hallucinations} hallucinations")
-
+    # 3. Calculate Stats
+    verified = len([c for c in verified_claims if c.status == "Verified"])
+    plausible = len([c for c in verified_claims if c.status == "Plausible"])
+    hallucinations = len([c for c in verified_claims if c.status == "Hallucination"])
+    
     return AuditResponse(
-        claims=verified_claims,
+        document=body.document,
         total=len(verified_claims),
         verified=verified,
         plausible=plausible,
         hallucinations=hallucinations,
+        claims=verified_claims
     )
 
+@router.post("/stream")
+async def run_audit_stream(body: AuditRequest):
+    logger.info(f"Received streaming audit request")
+    claims_data = await extract_claims(body.document)
+    
+    async def event_generator():
+        yield f"data: {json.dumps({'type': 'start', 'total': len(claims_data)})}\n\n"
+        
+        async for claim in verify_claims_stream(claims_data):
+            yield f"data: {json.dumps({'type': 'claim', 'claim': claim.model_dump()})}\n\n"
+            
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/sample", response_model=AuditResponse)
 def get_sample():

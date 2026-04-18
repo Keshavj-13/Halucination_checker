@@ -1,51 +1,16 @@
 const BASE = "http://localhost:8000";
 
-// Hardcoded fallback used when the backend is unreachable
 const FALLBACK = {
+    document:
+        "The Earth orbits the Sun. Python is best. AI is magic.",
     total: 3,
     verified: 1,
     plausible: 1,
     hallucinations: 1,
     claims: [
-        {
-            text: "The Earth orbits the Sun at an average distance of 93 million miles.",
-            status: "Verified",
-            confidence: 0.92,
-            evidence: [
-                {
-                    title: "NASA Solar System Exploration",
-                    snippet: "Earth orbits the Sun at a mean distance of about 93 million miles.",
-                    url: "https://solarsystem.nasa.gov",
-                    support: "supporting",
-                },
-            ],
-        },
-        {
-            text: "Machine learning models improve with more data.",
-            status: "Plausible",
-            confidence: 0.71,
-            evidence: [
-                {
-                    title: "Google AI Blog – Scaling Laws",
-                    snippet: "Larger datasets generally lead to improved model performance.",
-                    url: "https://ai.googleblog.com",
-                    support: "supporting",
-                },
-            ],
-        },
-        {
-            text: "Python is always the best language for every task.",
-            status: "Hallucination",
-            confidence: 0.83,
-            evidence: [
-                {
-                    title: "Stack Overflow Survey 2023",
-                    snippet: "Python is popular but not universally fastest.",
-                    url: "https://survey.stackoverflow.co/2023",
-                    support: "weak",
-                },
-            ],
-        },
+        { text: "The Earth orbits the Sun.", status: "Verified", confidence: 0.92, start_idx: 0, end_idx: 24, evidence: [] },
+        { text: "Python is best.", status: "Plausible", confidence: 0.71, start_idx: 25, end_idx: 40, evidence: [] },
+        { text: "AI is magic.", status: "Hallucination", confidence: 0.83, start_idx: 41, end_idx: 53, evidence: [] },
     ],
 };
 
@@ -68,7 +33,42 @@ export async function runAudit(document) {
     return data ?? FALLBACK;
 }
 
+export async function runAuditStream(document, onUpdate) {
+    try {
+        const response = await fetch(`${BASE}/audit/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ document }),
+        });
+
+        if (!response.ok) throw new Error("Stream failed");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n\n");
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                    const data = JSON.parse(line.replace("data: ", ""));
+                    onUpdate(data);
+                }
+            }
+        }
+    } catch (err) {
+        console.error("Streaming error:", err);
+        onUpdate({ type: "error", message: err.message });
+    }
+}
+
 export async function loadSample() {
-    const data = await safeFetch(`${BASE}/sample`);
+    const data = await safeFetch(`${BASE}/audit/sample`);
     return data ?? FALLBACK;
 }

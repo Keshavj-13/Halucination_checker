@@ -22,7 +22,7 @@ cd backend
 # Check for venv or just install requirements
 if [ -f "requirements.txt" ]; then
     echo "📦 Checking Python dependencies..."
-    pip install -r requirements.txt > /dev/null 2>&1
+    pip install -r requirements.txt
 fi
 
 uvicorn main:app --host 0.0.0.0 --port 8000 &
