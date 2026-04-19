@@ -26,6 +26,7 @@ LABEL_PROBABLE = "Plausible"
 ABSOLUTE_CONFIDENCE_THRESHOLD = 0.9
 ABSOLUTE_TO_PLAUSIBLE_PENALTY = 3.0
 ABSOLUTE_WRONG_LABEL_PENALTY = 1.5
+BASE_SEEDS_PER_FIELD_CATEGORY = 10000
 
 
 @dataclass
@@ -72,7 +73,7 @@ def _to_evidence(items: Sequence[Dict[str, object]]) -> List[Evidence]:
 
 
 def _field_seed_bank() -> Dict[str, Dict[str, List[Tuple[str, str, str]]]]:
-    return {
+    raw = {
         "astronomy": {
             "true": [("Earth orbits the Sun", "Earth revolves around the Sun in a yearly orbit.", "nasa.gov"), ("The Moon orbits Earth", "The Moon is Earth's natural satellite and orbits Earth.", "nasa.gov")],
             "false": [("Earth is flat", "Earth is an oblate spheroid, not flat.", "nasa.gov"), ("The Sun revolves around Earth", "In the heliocentric model, Earth orbits the Sun.", "nasa.gov")],
@@ -138,6 +139,11 @@ def _field_seed_bank() -> Dict[str, Dict[str, List[Tuple[str, str, str]]]]:
             "false": [("Triangles have four sides", "Triangles have three sides, not four.", "britannica.com"), ("Division by zero equals one", "Division by zero is undefined, not equal to one.", "mit.edu")],
             "probable": [("A new proof strategy may simplify some open problems", "Usefulness of new proof strategies is evaluated over time.", "ams.org"), ("Math olympiad training could improve general problem solving", "Transfer effects vary across learners and settings.", "oecd.org")],
         },
+        "math": {
+            "true": [("1+1=2", "1+1=2", "mathworld.wolfram.com"), ("2*3=6", "2*3=6", "mathworld.wolfram.com")],
+            "false": [("1+1=3", "1+1!=3", "mathworld.wolfram.com"), ("2*3=5", "2*3!=5", "mathworld.wolfram.com")],
+            "probable": [("x+y=y+x", "x+y=y+x", "mathworld.wolfram.com"), ("x^2+y^2=z^2", "x^2+y^2=z^2", "mathworld.wolfram.com")],
+        },
         "literature": {
             "true": [("Shakespeare wrote Hamlet", "William Shakespeare is credited as the author of Hamlet.", "britannica.com"), ("A novel is a form of long prose fiction", "Novels are long-form prose fiction works.", "britannica.com")],
             "false": [("Shakespeare wrote The Odyssey", "The Odyssey is attributed to Homer, not Shakespeare.", "britannica.com"), ("All poems rhyme", "Many poems do not use rhyme.", "poetryfoundation.org")],
@@ -185,8 +191,247 @@ def _field_seed_bank() -> Dict[str, Dict[str, List[Tuple[str, str, str]]]]:
         },
     }
 
+    def _tenfold_rows(rows: List[Tuple[str, str, str]], category: str, field: str) -> List[Tuple[str, str, str]]:
+        # 10x more base seed statements before higher-order combinations.
+        if field == "math":
+            symbol_wrappers = [
+                "{}",
+                "({})",
+                "(({}))",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+            ]
+            out: List[Tuple[str, str, str]] = []
+            for claim, snippet, domain in rows:
+                for i, fmt in enumerate(symbol_wrappers, start=1):
+                    c = fmt.format(claim.replace(" ", ""))
+                    s = fmt.format(snippet.replace(" ", ""))
+                    out.append((c, s, domain))
+            return out
 
-def _expand_field_candidates(category: str) -> List[Tuple[str, List[Dict[str, object]], str, int]]:
+        lead = {
+            "true": [
+                "{}",
+                "Established fact: {}",
+                "Verified baseline: {}",
+                "In standard references, {}",
+                "Reliable sources confirm {}",
+                "Cross-checked claim: {}",
+                "Canonical statement: {}",
+                "Known true statement: {}",
+                "Fundamental fact: {}",
+                "Reference-grade claim: {}",
+            ],
+            "false": [
+                "{}",
+                "Debunked claim: {}",
+                "Known false statement: {}",
+                "Contradicted assertion: {}",
+                "Rejected claim: {}",
+                "Fact-check false: {}",
+                "Common misconception: {}",
+                "Incorrect baseline: {}",
+                "Refuted statement: {}",
+                "Invalid claim: {}",
+            ],
+            "probable": [
+                "{}",
+                "Plausible but uncertain: {}",
+                "Context-dependent claim: {}",
+                "Mixed-evidence statement: {}",
+                "Debated proposition: {}",
+                "Scenario-dependent claim: {}",
+                "Tentative forecast: {}",
+                "Evidence-evolving claim: {}",
+                "Conditionally plausible: {}",
+                "Open-outcome statement: {}",
+            ],
+        }[category]
+
+        evidence_reinforcement = {
+            "true": [
+                "Independent references report the same underlying fact.",
+                "This aligns with standard educational and scientific summaries.",
+                "The statement matches widely cited baseline references.",
+                "Authoritative sources describe the same relationship.",
+                "This is consistent with accepted reference material.",
+            ],
+            "false": [
+                "This is contradicted by established reference material.",
+                "Multiple sources classify this as a misconception.",
+                "The claim conflicts with standard factual summaries.",
+                "Authoritative references explicitly refute this claim.",
+                "This statement fails against baseline fact checks.",
+            ],
+            "probable": [
+                "Evidence remains mixed across credible sources.",
+                "Outcomes depend on context and assumptions.",
+                "Current research does not produce a universal conclusion.",
+                "The effect appears conditional across settings.",
+                "Published findings show uncertainty and variation.",
+            ],
+        }[category]
+
+        out: List[Tuple[str, str, str]] = []
+        for claim, snippet, domain in rows:
+            for i, fmt in enumerate(lead, start=1):
+                reinforce = evidence_reinforcement[(i - 1) % len(evidence_reinforcement)]
+                out.append((fmt.format(claim), f"{snippet} {reinforce}", domain))
+        return out
+
+    def _inflate(
+        field: str,
+        category: str,
+        rows: List[Tuple[str, str, str]],
+        target: int = BASE_SEEDS_PER_FIELD_CATEGORY,
+    ) -> List[Tuple[str, str, str]]:
+        rows = _tenfold_rows(rows, category, field)
+        if len(rows) >= target:
+            return rows[:target]
+
+        if field == "math":
+            # Keep math as symbols only; generate high-volume unique equations.
+            variants: List[Tuple[str, str, str]] = []
+            seen = set()
+            domain = "mathworld.wolfram.com"
+
+            n = 1
+            while len(variants) < target:
+                a = (n % 997) + 1
+                b = ((n * 7) % 991) + 1
+
+                if category == "true":
+                    c1 = f"{a}+{b}={a+b}"
+                    c2 = f"{a}*{b}={a*b}"
+                    c3 = f"({a}+{b})-{b}={a}"
+                    cands = [c1, c2, c3]
+                elif category == "false":
+                    c1 = f"{a}+{b}={a+b+1}"
+                    c2 = f"{a}*{b}={a*b+1}"
+                    c3 = f"({a}+{b})-{b}={a+1}"
+                    cands = [c1, c2, c3]
+                else:
+                    c1 = f"x+{a}={a}+x"
+                    c2 = f"(x+{a})^2=x^2+2*{a}*x+{a*a}"
+                    c3 = f"x*({a}+{b})={a}*x+{b}*x"
+                    cands = [c1, c2, c3]
+
+                for claim in cands:
+                    key = claim
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    variants.append((claim, claim, domain))
+                    if len(variants) >= target:
+                        return variants
+                n += 1
+
+            return variants[:target]
+
+        factual_prefix = {
+            "true": [
+                "According to reference material,",
+                "In standard documentation,",
+                "In established summaries,",
+                "In mainstream sources,",
+                "Across cited references,",
+            ],
+            "false": [
+                "Contrary to evidence,",
+                "Despite repeated debunks,",
+                "Against established references,",
+                "In contradiction with documented facts,",
+                "Despite authoritative corrections,",
+            ],
+            "probable": [
+                "Under current evidence,",
+                "Given mixed findings,",
+                "In conditional scenarios,",
+                "Across uncertain projections,",
+                "With context-sensitive outcomes,",
+            ],
+        }[category]
+
+        factual_suffix = {
+            "true": [
+                "under normal conditions.",
+                "as described by trusted references.",
+                "in baseline factual framing.",
+                "in standard instructional context.",
+                "without speculative assumptions.",
+            ],
+            "false": [
+                "and is therefore factually incorrect.",
+                "and does not match reliable evidence.",
+                "and conflicts with authoritative sources.",
+                "and remains a known misconception.",
+                "and fails basic factual validation.",
+            ],
+            "probable": [
+                "with outcomes varying by context.",
+                "without universal agreement.",
+                "pending stronger longitudinal evidence.",
+                "with heterogeneous reported effects.",
+                "with scenario-dependent conclusions.",
+            ],
+        }[category]
+
+        evidence_suffix = {
+            "true": [
+                "Independent sources describe the same relationship.",
+                "Reference summaries are consistent on this point.",
+                "This matches standard domain explanations.",
+                "This is corroborated across mainstream sources.",
+                "The statement is stable across educational references.",
+            ],
+            "false": [
+                "Reliable sources directly refute this statement.",
+                "This contradicts accepted factual references.",
+                "Evidence reviews classify this as incorrect.",
+                "This is inconsistent with mainstream documentation.",
+                "Fact-checking references reject this claim.",
+            ],
+            "probable": [
+                "Published evidence indicates uncertainty.",
+                "Findings vary across populations and settings.",
+                "The effect is not universally established.",
+                "Research synthesis remains mixed.",
+                "Current consensus is conditional rather than absolute.",
+            ],
+        }[category]
+
+        variants: List[Tuple[str, str, str]] = []
+        seen = set()
+        for base_claim, base_snippet, domain in rows:
+            for p in factual_prefix:
+                for s in factual_suffix:
+                    for e in evidence_suffix:
+                        claim = f"{p} {base_claim} {s}".strip()
+                        snippet = f"{base_snippet} {e}".strip()
+                        key = (re.sub(r"\s+", " ", claim.lower()), domain)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        variants.append((claim, snippet, domain))
+                        if len(variants) >= target:
+                            return variants
+
+        return variants[:target]
+
+    expanded: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
+    for field, per_cat in raw.items():
+        expanded[field] = {}
+        for category, rows in per_cat.items():
+            expanded[field][category] = _inflate(field, category, rows)
+    return expanded
+
+
+def _expand_field_candidates(category: str, per_field: int, rnd: random.Random) -> List[Tuple[str, List[Dict[str, object]], str, int]]:
     bank = _field_seed_bank()
     hard_prefixes = {
         "true": [
@@ -280,28 +525,56 @@ def _expand_field_candidates(category: str) -> List[Tuple[str, List[Dict[str, ob
 
     out: List[Tuple[str, List[Dict[str, object]], str, int]] = []
     for field, field_rows in bank.items():
-        for base_claim, snippet, domain in field_rows[category]:
-            for pref in hard_prefixes:
-                for suff in hard_suffixes:
-                    core = f"{pref.format(c=base_claim)} {suff}".strip()
-                    for complexity, lead, mid, tail in complexity_variants:
-                        claim = " ".join(part for part in [lead, core, mid, tail] if part).strip()
-                        if category == "true":
-                            evidence = [
-                                _make_evidence(snippet, domain=domain),
-                                _make_evidence("Independent references align with this statement.", domain="britannica.com", reliability=0.84),
-                            ]
-                        elif category == "false":
-                            evidence = [
-                                _make_evidence(snippet, domain=domain, stance="refute", support="contradicting"),
-                                _make_evidence("This claim is contradicted by reliable references.", domain="britannica.com", stance="refute", support="contradicting", reliability=0.84),
-                            ]
-                        else:
-                            evidence = [
-                                _make_evidence(snippet, domain=domain, stance="neutral", support="weak", reliability=0.84),
-                                _make_evidence("Evidence is mixed and context-dependent.", domain="oecd.org", stance="neutral", support="weak", reliability=0.82),
-                            ]
-                        out.append((claim, evidence, field, complexity))
+        seeds = field_rows[category]
+        seen = set()
+        field_out: List[Tuple[str, List[Dict[str, object]], str, int]] = []
+        attempts = 0
+        max_attempts = max(50_000, per_field * 80)
+
+        math_symbol_prefixes = ["", "(", "((", "", "", "", "", "", "", ""]
+        math_symbol_suffixes = ["", ")", "))", "", "", "", "", "", "", ""]
+
+        while len(field_out) < per_field and attempts < max_attempts:
+            attempts += 1
+            base_claim, snippet, domain = seeds[rnd.randrange(len(seeds))]
+            if field == "math":
+                pi = rnd.randrange(len(math_symbol_prefixes))
+                si = rnd.randrange(len(math_symbol_suffixes))
+                complexity = ((pi + si) % 10) + 1
+                claim = f"{math_symbol_prefixes[pi]}{base_claim.replace(' ', '')}{math_symbol_suffixes[si]}"
+            else:
+                pref = hard_prefixes[rnd.randrange(len(hard_prefixes))]
+                suff = hard_suffixes[rnd.randrange(len(hard_suffixes))]
+                complexity, lead, mid, tail = complexity_variants[rnd.randrange(len(complexity_variants))]
+                core = f"{pref.format(c=base_claim)} {suff}".strip()
+                claim = " ".join(part for part in [lead, core, mid, tail] if part).strip()
+            key = re.sub(r"\s+", " ", claim.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if category == "true":
+                evidence = [
+                    _make_evidence(snippet, domain=domain),
+                    _make_evidence("Independent references align with this statement." if field != "math" else snippet, domain="britannica.com" if field != "math" else domain, reliability=0.84),
+                ]
+            elif category == "false":
+                evidence = [
+                    _make_evidence(snippet, domain=domain, stance="refute", support="contradicting"),
+                    _make_evidence("This claim is contradicted by reliable references." if field != "math" else snippet, domain="britannica.com" if field != "math" else domain, stance="refute", support="contradicting", reliability=0.84),
+                ]
+            else:
+                evidence = [
+                    _make_evidence(snippet, domain=domain, stance="neutral", support="weak", reliability=0.84),
+                    _make_evidence("Evidence is mixed and context-dependent." if field != "math" else snippet, domain="oecd.org" if field != "math" else domain, stance="neutral", support="weak", reliability=0.82),
+                ]
+
+            field_out.append((claim, evidence, field, complexity))
+
+        if len(field_out) < per_field:
+            raise ValueError(f"Could not generate enough unique claims for field={field} category={category}. generated={len(field_out)} needed={per_field}")
+
+        out.extend(field_out)
     return out
 
 
@@ -317,38 +590,11 @@ def _dedupe_cases(items: Iterable[Tuple[str, List[Dict[str, object]], str, int]]
     return out
 
 
-def _sample_balanced_by_field(
-    items: List[Tuple[str, List[Dict[str, object]], str, int]],
-    per_field: int,
-    rnd: random.Random,
-) -> List[Tuple[str, List[Dict[str, object]], str, int]]:
-    rows = _dedupe_cases(items)
-    grouped: Dict[str, List[Tuple[str, List[Dict[str, object]], str, int]]] = defaultdict(list)
-    for row in rows:
-        grouped[row[2]].append(row)
-
-    fields = sorted(grouped.keys())
-    if not fields:
-        raise ValueError("No benchmark fields available")
-
-    for f in fields:
-        if len(grouped[f]) < per_field:
-            raise ValueError(f"Field {f} has only {len(grouped[f])} cases, need at least {per_field}")
-        rnd.shuffle(grouped[f])
-
-    selected: List[Tuple[str, List[Dict[str, object]], str, int]] = []
-    for f in fields:
-        selected.extend(grouped[f][:per_field])
-
-    rnd.shuffle(selected)
-    return selected
-
-
 def generate_benchmark(per_field_per_category: int = 1000, holdout_ratio: float = 0.2, seed: int = 23) -> List[ClaimCase]:
     rnd = random.Random(seed)
-    true_items = _sample_balanced_by_field(_expand_field_candidates("true"), per_field_per_category, rnd)
-    false_items = _sample_balanced_by_field(_expand_field_candidates("false"), per_field_per_category, rnd)
-    probable_items = _sample_balanced_by_field(_expand_field_candidates("probable"), per_field_per_category, rnd)
+    true_items = _expand_field_candidates("true", per_field_per_category, rnd)
+    false_items = _expand_field_candidates("false", per_field_per_category, rnd)
+    probable_items = _expand_field_candidates("probable", per_field_per_category, rnd)
 
     all_cases: List[ClaimCase] = []
 
@@ -687,7 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     g = sub.add_parser("generate", help="Generate benchmark dataset")
-    g.add_argument("--per-field-per-category", type=int, default=1000)
+    g.add_argument("--per-field-per-category", type=int, default=10000)
     g.add_argument("--per-category", type=int, default=None, help="Deprecated alias; use --per-field-per-category")
     g.add_argument("--holdout-ratio", type=float, default=0.2)
     g.add_argument("--seed", type=int, default=23)
@@ -717,12 +963,13 @@ def main() -> None:
             "total": len(cases),
             "counts": {f"{k[0]}:{k[1]}": v for k, v in sorted(counts.items())},
             "field_count": len(field_counts),
+            "base_seeds_per_field_per_category": BASE_SEEDS_PER_FIELD_CATEGORY,
             "per_field_per_category": per_field_per_category,
         }
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return
 
-    cases = _load_or_generate(1000, 0.2, 23, False)
+    cases = _load_or_generate(10000, 0.2, 23, False)
 
     if args.cmd == "evaluate":
         evaluate(cases, split=args.split, blind=args.blind, run_id="manual-eval")

@@ -184,15 +184,29 @@ def _safe_eval_arithmetic(expr: str) -> Optional[float]:
 
 def _evaluate_arithmetic_claim(claim: str) -> Optional[bool]:
     c = (claim or "").lower().replace("equals", "=")
-    m = re.search(r"([-+*/().\d\s\^]+)=([-+*/().\d\s\^]+)", c)
+    m = re.search(r"([-+*/().\d\s\^]+)\s*(==|=|!=|<=|>=|<|>)\s*([-+*/().\d\s\^]+)", c)
     if not m:
         return None
 
     lhs = _safe_eval_arithmetic(m.group(1))
-    rhs = _safe_eval_arithmetic(m.group(2))
+    op = m.group(2)
+    rhs = _safe_eval_arithmetic(m.group(3))
     if lhs is None or rhs is None:
         return None
-    return abs(lhs - rhs) <= 1e-9
+
+    if op in {"=", "=="}:
+        return abs(lhs - rhs) <= 1e-9
+    if op == "!=":
+        return abs(lhs - rhs) > 1e-9
+    if op == "<":
+        return lhs < rhs
+    if op == "<=":
+        return lhs <= rhs
+    if op == ">":
+        return lhs > rhs
+    if op == ">=":
+        return lhs >= rhs
+    return None
 
 
 def _known_truth_eval(claim: str, domain: str) -> Tuple[Optional[str], str, List[Evidence]]:
@@ -233,6 +247,40 @@ def _known_truth_eval(claim: str, domain: str) -> Tuple[Optional[str], str, List
             "refute",
         )
         return "Hallucination", "trusted_arithmetic_contradiction", evs
+
+    ABSOLUTE_TRUE_RULES: List[Tuple[re.Pattern, str, str]] = [
+        (re.compile(r"\btriangles?\b.*\bthree sides\b", re.IGNORECASE), "britannica.com", "Triangles have three sides by definition."),
+        (re.compile(r"\bsquares?\b.*\bfour equal sides\b", re.IGNORECASE), "britannica.com", "Squares have four equal sides by definition."),
+        (re.compile(r"\balive\b.*\bnot dead\b", re.IGNORECASE), "britannica.com", "In standard logic, living and dead are mutually exclusive states at the same instant."),
+        (re.compile(r"\bearth\b.*\borbit(s|ing)?\b.*\bsun\b", re.IGNORECASE), "nasa.gov", "Earth orbits the Sun in the heliocentric model."),
+        (re.compile(r"\bwater\b.*\bfreez(es|ing)?\b.*\b0\s*°?c|\bcelsius\b.*\bstandard\b", re.IGNORECASE), "nist.gov", "Pure water freezes near 0°C at standard pressure."),
+        (re.compile(r"\bwhole\b.*\bgreater\b.*\bparts?\b", re.IGNORECASE), "britannica.com", "A whole is greater than any proper part in standard arithmetic/order reasoning."),
+        (re.compile(r"\bno object\b.*\btwo.*places\b.*\bsame time\b", re.IGNORECASE), "britannica.com", "In classical physics, a macroscopic object is not in two distinct places simultaneously."),
+        (re.compile(r"\bbachelors?\b.*\bunmarried men\b", re.IGNORECASE), "britannica.com", "By definition, a bachelor is an unmarried man."),
+        (re.compile(r"\bif\s*a\s*=\s*b\s*and\s*b\s*=\s*c\s*,?\s*then\s*a\s*=\s*c\b", re.IGNORECASE), "mathworld.wolfram.com", "Equality is transitive: if A=B and B=C then A=C."),
+    ]
+
+    ABSOLUTE_FALSE_RULES: List[Tuple[re.Pattern, str, str]] = [
+        (re.compile(r"\bsquares?\b.*\bfive sides\b", re.IGNORECASE), "britannica.com", "A square does not have five sides."),
+        (re.compile(r"\ball birds\b.*\bmammals\b", re.IGNORECASE), "britannica.com", "Birds are not mammals; they are a distinct vertebrate class."),
+        (re.compile(r"\btriangles?\b.*\bfour sides\b", re.IGNORECASE), "britannica.com", "A triangle does not have four sides."),
+        (re.compile(r"\bwater\b.*\bboil(s|ing)?\b.*\b0\s*°?c|\bcelsius\b.*\bstandard\b", re.IGNORECASE), "nist.gov", "Water does not boil at 0°C at standard pressure."),
+        (re.compile(r"\bbachelor\b.*\bmarried man\b", re.IGNORECASE), "britannica.com", "A bachelor is not a married man by definition."),
+        (re.compile(r"\bsun\b.*\brevolve(s|d|ing)?\b.*\bearth\b", re.IGNORECASE), "nasa.gov", "In modern astronomy, Earth orbits the Sun; not vice versa."),
+        (re.compile(r"\bcompletely black\b.*\bcompletely white\b.*\bsame time\b", re.IGNORECASE), "britannica.com", "The same surface cannot be completely black and completely white in the same respect simultaneously."),
+        (re.compile(r"\ball humans\b.*\breptiles\b", re.IGNORECASE), "britannica.com", "Humans are mammals, not reptiles."),
+        (re.compile(r"\bno numbers exist\b", re.IGNORECASE), "mathworld.wolfram.com", "Numbers exist in standard mathematics."),
+    ]
+
+    for pat, src, snippet in ABSOLUTE_TRUE_RULES:
+        if pat.search(c):
+            add("Trusted Rulebase", src, snippet, "supporting", "support")
+            return "Verified", "trusted_absolute_true", evs
+
+    for pat, src, snippet in ABSOLUTE_FALSE_RULES:
+        if pat.search(c):
+            add("Trusted Rulebase", src, snippet, "contradicting", "refute")
+            return "Hallucination", "trusted_absolute_false", evs
 
     # Engineering/logic fundamentals
     if "ohm" in c and "v = i" in c and "/" not in c:

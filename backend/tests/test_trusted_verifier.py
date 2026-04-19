@@ -37,3 +37,29 @@ def test_trusted_arithmetic_false_short_circuit():
     assert out.status == "Hallucination"
     assert out.insufficient is False
     assert out.reason == "trusted_arithmetic_contradiction"
+
+
+def test_trusted_arithmetic_bulk_true_1000():
+    # 500 addition identities + 500 multiplication identities
+    for i in range(1, 501):
+        out = verify_with_trusted_knowledge(f"{i} + {i} = {2 * i}")
+        assert out.status == "Verified", i
+        assert out.reason == "trusted_arithmetic_match", i
+
+    for i in range(1, 501):
+        out = verify_with_trusted_knowledge(f"{i} * 3 = {i * 3}")
+        assert out.status == "Verified", i
+        assert out.reason == "trusted_arithmetic_match", i
+
+
+def test_trusted_arithmetic_bulk_false_1000():
+    # 500 wrong addition identities + 500 wrong comparison identities
+    for i in range(1, 501):
+        out = verify_with_trusted_knowledge(f"{i} + {i} = {2 * i + 1}")
+        assert out.status == "Hallucination", i
+        assert out.reason == "trusted_arithmetic_contradiction", i
+
+    for i in range(1, 501):
+        out = verify_with_trusted_knowledge(f"{i} < {i - 1}")
+        assert out.status == "Hallucination", i
+        assert out.reason == "trusted_arithmetic_contradiction", i
