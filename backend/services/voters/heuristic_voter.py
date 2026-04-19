@@ -34,7 +34,9 @@ class HeuristicVoter(Voter):
                 sim = 0.0
 
             # Reliability-weighted lexical score
-            weighted = sim * (0.7 + 0.3 * ev.reliability_score)
+            stance = (ev.stance or "mention").lower()
+            stance_mult = 1.0 if stance == "support" else 0.65 if stance == "neutral" else 0.35
+            weighted = sim * (0.7 + 0.3 * ev.reliability_score) * stance_mult * (1.0 - min(max(ev.bias_penalty, 0.0), 1.0) * 0.25)
             if weighted > best_score:
                 best_score = weighted
                 best_idx = idx

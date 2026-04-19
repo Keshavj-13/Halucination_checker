@@ -17,7 +17,22 @@ DOMAIN_PRIOR = {
     "wikipedia.org": 0.72,
 }
 
-SPAM_PATTERNS = [r"click here", r"buy now", r"sponsored", r"casino", r"viagra"]
+SPAM_PATTERNS = [r"click here", r"buy now", r"casino", r"viagra"]
+SPONSORSHIP_PATTERNS = [
+    r"sponsored",
+    r"paid partnership",
+    r"affiliate",
+    r"funded by",
+    r"conflict of interest",
+    r"advertorial",
+]
+ADVOCACY_PATTERNS = [
+    r"must",
+    r"undeniable",
+    r"everyone knows",
+    r"obviously true",
+    r"without question",
+]
 
 
 @dataclass
@@ -42,21 +57,19 @@ class SourceReliabilityScorer:
         quality_score, quality_signals = self._content_quality(text, title)
         freshness_score = self._freshness_score(text, claim_text, headers)
         spam_penalty = self._spam_penalty(text)
+        sponsorship_penalty = self._sponsorship_penalty(text)
+        advocacy_penalty = self._advocacy_penalty(text)
+        bias_penalty = min(max(0.6 * sponsorship_penalty + 0.4 * advocacy_penalty, 0.0), 1.0)
         cross_support = min(max(cross_source_support, 0.0), 1.0)
 
-        score = float(
-            min(
-                max(
-                    0.20 * domain_score
-                    + 0.35 * quality_score
-                    + 0.20 * freshness_score
-                    + 0.20 * cross_support
-                    + 0.05 * (1.0 - spam_penalty),
-                    0.0,
-                ),
-                1.0,
-            )
+        base = (
+            0.20 * domain_score
+            + 0.35 * quality_score
+            + 0.20 * freshness_score
+            + 0.20 * cross_support
+            + 0.05 * (1.0 - spam_penalty)
         )
+        score = float(min(max(base - 0.10 * bias_penalty, 0.0), 1.0))
 
         signals = {
             "domain_prior": domain_score,
@@ -64,11 +77,16 @@ class SourceReliabilityScorer:
             "freshness": freshness_score,
             "cross_source_support": cross_support,
             "spam_penalty": spam_penalty,
+            "sponsorship_penalty": sponsorship_penalty,
+            "advocacy_penalty": advocacy_penalty,
+            "bias_penalty": bias_penalty,
+            "sponsorship_flag": 1.0 if sponsorship_penalty >= 0.2 else 0.0,
             **quality_signals,
         }
         explanation = (
             f"domain={domain_score:.2f}, quality={quality_score:.2f}, freshness={freshness_score:.2f}, "
-            f"cross_support={cross_support:.2f}, spam_penalty={spam_penalty:.2f}"
+            f"cross_support={cross_support:.2f}, spam_penalty={spam_penalty:.2f}, "
+            f"sponsorship_penalty={sponsorship_penalty:.2f}, advocacy_penalty={advocacy_penalty:.2f}"
         )
         return SourceReliabilityResult(score=score, explanation=explanation, signals=signals)
 
@@ -137,10 +155,7 @@ class SourceReliabilityScorer:
         norm = [d if d.tzinfo else d.replace(tzinfo=timezone.utc) for d in dates]
         newest = max(norm)
         age_years = max((datetime.now(timezone.utc) - newest).days / 365.25, 0.0)
-        if re.search(r"\b(now|current|latest|today|recent|this year)\b", claim_text.lower()):
-            decay = 2.0
-        else:
-            decay = 6.0
+        decay = 2.0 if re.search(r"\b(now|current|latest|today|recent|this year)\b", claim_text.lower()) else 6.0
         return float(min(max(pow(2.718281828, -age_years / decay), 0.0), 1.0))
 
     def _spam_penalty(self, text: str) -> float:
@@ -152,6 +167,17 @@ class SourceReliabilityScorer:
         freq = Counter(toks)
         repeat = max(freq.values()) / len(toks)
         return min(0.6 * (matches / max(1, len(SPAM_PATTERNS))) + 0.4 * min(repeat, 1.0), 1.0)
+
+    def _sponsorship_penalty(self, text: str) -> float:
+        t = text.lower()
+        matches = sum(1 for p in SPONSORSHIP_PATTERNS if re.search(p, t))
+        return min(matches / max(1, len(SPONSORSHIP_PATTERNS) * 0.45), 1.0)
+
+    def _advocacy_penalty(self, text: str) -> float:
+        t = text.lower()
+        matches = sum(1 for p in ADVOCACY_PATTERNS if re.search(p, t))
+        caps = len(re.findall(r"\b[A-Z]{4,}\b", text))
+        return min(0.7 * (matches / max(1, len(ADVOCACY_PATTERNS) * 0.4)) + 0.3 * min(caps / 12.0, 1.0), 1.0)
 
 
 source_reliability_scorer = SourceReliabilityScorer()

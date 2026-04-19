@@ -15,6 +15,9 @@ class Evidence(BaseModel):
     snippet: str
     url: str
     support: str  # "supporting", "contradicting", "weak"
+    stance: str = "mention"  # support|refute|neutral|mention|quotation|reported_belief
+    attribution: str = "none"  # none|authoritative|reported|quoted
+    citation_direction: str = "none"  # endorses|refutes|reports|none
     reliability_score: float = 0.0  # 0.0 to 1.0
     reliability_explanation: str = ""
     source_domain: str = ""
@@ -23,6 +26,10 @@ class Evidence(BaseModel):
     chunk_end: int = 0
     embedding: Optional[List[float]] = None
     cluster_id: Optional[int] = None
+    bias_penalty: float = 0.0
+    sponsorship_flag: bool = False
+    is_quote: bool = False
+    is_reported_belief: bool = False
     page_quality_signals: Dict[str, float] = Field(default_factory=dict)
 
 
@@ -68,7 +75,9 @@ class ClaimLogRecord(BaseModel):
     end_idx: int
     retrieved_urls: List[str] = Field(default_factory=list)
     evidence_chunks: List[Evidence] = Field(default_factory=list)
+    chunk_stances: List[str] = Field(default_factory=list)
     source_reliability_scores: List[float] = Field(default_factory=list)
+    bias_scores: List[float] = Field(default_factory=list)
     voter_scores: Dict[str, float] = Field(default_factory=dict)
     voter_results: Dict[str, Any] = Field(default_factory=dict)
     final_consensus_score: float

@@ -44,42 +44,117 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"\w+", text)
 
 
-def _chunk_text_cpu(payload: Tuple[str, str, str, float, str, Dict[str, float]]) -> List[Dict[str, Any]]:
-    url, title, text, reliability, explanation, quality_signals = payload
+def _split_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return [p.strip() for p in parts if p and len(p.strip()) >= 30]
+
+
+def _infer_chunk_metadata(claim: str, snippet: str) -> Dict[str, Any]:
+    claim_tokens = set(_tokenize(claim.lower()))
+    snip_tokens = set(_tokenize(snippet.lower()))
+    union = len(claim_tokens | snip_tokens)
+    lexical = (len(claim_tokens & snip_tokens) / union) if union else 0.0
+
+    lower = snippet.lower()
+    quote = '"' in snippet or "“" in snippet or "”" in snippet
+    reported = bool(re.search(r"\b(some people believe|it is claimed|reportedly|allegedly|is said to|according to)\b", lower))
+    refute_cue = bool(re.search(r"\b(false|incorrect|debunked|no evidence|not true|myth|refute|contradict)\b", lower))
+    support_cue = bool(re.search(r"\b(show(s|ed)?|demonstrate(s|d)?|confirm(s|ed)?|evidence indicates|measured|observed)\b", lower))
+
+    stance = "mention"
+    citation_direction = "none"
+    attribution = "none"
+    support = "weak"
+
+    if quote:
+        attribution = "quoted"
+    elif reported:
+        attribution = "reported"
+
+    if reported:
+        stance = "reported_belief"
+        citation_direction = "reports"
+    elif refute_cue and lexical >= 0.08:
+        stance = "refute"
+        citation_direction = "refutes"
+        support = "contradicting"
+    elif support_cue and lexical >= 0.10:
+        stance = "support"
+        citation_direction = "endorses"
+        support = "supporting"
+    elif quote and lexical >= 0.08:
+        stance = "quotation"
+        citation_direction = "reports"
+    elif lexical >= 0.18:
+        stance = "neutral"
+    else:
+        stance = "mention"
+
+    return {
+        "stance": stance,
+        "attribution": attribution,
+        "citation_direction": citation_direction,
+        "support": support,
+        "is_quote": quote,
+        "is_reported_belief": reported,
+    }
+
+
+def _chunk_text_cpu(payload: Tuple[str, str, str, float, str, Dict[str, float], str]) -> List[Dict[str, Any]]:
+    url, title, text, reliability, explanation, quality_signals, claim_text = payload
     tokens = _tokenize(text)
     if not tokens:
         return []
 
     chunks: List[Dict[str, Any]] = []
-    window, stride = 280, 220
-    for i in range(0, len(tokens), stride):
-        chunk_tokens = tokens[i : i + window]
-        if len(chunk_tokens) < 20:
+    sentences = _split_sentences(text)
+    cursor = 0
+    for sent in sentences:
+        stoks = _tokenize(sent)
+        if len(stoks) < 10:
             continue
+        meta = _infer_chunk_metadata(claim_text, sent)
         chunks.append(
             {
                 "title": title,
                 "url": url,
-                "snippet": " ".join(chunk_tokens),
-                "support": "weak",
+                "snippet": sent,
+                "support": meta["support"],
+                "stance": meta["stance"],
+                "attribution": meta["attribution"],
+                "citation_direction": meta["citation_direction"],
+                "is_quote": meta["is_quote"],
+                "is_reported_belief": meta["is_reported_belief"],
+                "bias_penalty": float(quality_signals.get("bias_penalty", 0.0)),
+                "sponsorship_flag": bool(quality_signals.get("sponsorship_flag", 0.0) >= 0.5),
                 "reliability_score": reliability,
                 "reliability_explanation": explanation,
                 "source_domain": urlparse(url).netloc,
-                "chunk_start": i,
-                "chunk_end": min(i + window, len(tokens)),
+                "chunk_start": cursor,
+                "chunk_end": cursor + len(stoks),
                 "page_quality_signals": quality_signals,
             }
         )
+        cursor += len(stoks)
         if len(chunks) >= MAX_EVIDENCE_CHUNKS:
             break
 
     if not chunks and len(tokens) >= 12:
+        snippet = " ".join(tokens[: min(180, len(tokens))])
+        meta = _infer_chunk_metadata(claim_text, snippet)
         chunks.append(
             {
                 "title": title,
                 "url": url,
-                "snippet": " ".join(tokens[: min(180, len(tokens))]),
-                "support": "weak",
+                "snippet": snippet,
+                "support": meta["support"],
+                "stance": meta["stance"],
+                "attribution": meta["attribution"],
+                "citation_direction": meta["citation_direction"],
+                "is_quote": meta["is_quote"],
+                "is_reported_belief": meta["is_reported_belief"],
+                "bias_penalty": float(quality_signals.get("bias_penalty", 0.0)),
+                "sponsorship_flag": bool(quality_signals.get("sponsorship_flag", 0.0) >= 0.5),
                 "reliability_score": reliability,
                 "reliability_explanation": explanation,
                 "source_domain": urlparse(url).netloc,
@@ -197,7 +272,7 @@ class RetrievalPipeline:
         pages = self._dedupe_pages(valid_pages)
         cross = source_reliability_scorer.estimate_cross_source_support([p[2] for p in pages])
 
-        payloads: List[Tuple[str, str, str, float, str, Dict[str, float]]] = []
+        payloads: List[Tuple[str, str, str, float, str, Dict[str, float], str]] = []
         for i, (url, title, text, headers) in enumerate(pages):
             rel = source_reliability_scorer.score_page(
                 url=url,
@@ -207,7 +282,7 @@ class RetrievalPipeline:
                 headers=headers,
                 cross_source_support=cross[i] if i < len(cross) else 0.0,
             )
-            payloads.append((url, title, text, rel.score, rel.explanation, rel.signals))
+            payloads.append((url, title, text, rel.score, rel.explanation, rel.signals, claim))
 
         t2 = time.perf_counter()
         loop = asyncio.get_running_loop()
@@ -288,11 +363,38 @@ class RetrievalPipeline:
         if cached:
             return cached[:MAX_SEARCH_RESULTS]
 
+        queries = [
+            ("claim", claim),
+            ("verify", f"{claim} fact check true or false"),
+            ("counter", f"{claim} why false debunked"),
+        ]
+
+        all_urls: List[str] = []
+        for qtype, q in queries:
+            urls = await self._search_urls_single(q, qtype=qtype)
+            all_urls.extend(urls)
+
+        deduped: List[str] = []
+        seen = set()
+        for u in all_urls:
+            if u in seen:
+                continue
+            seen.add(u)
+            deduped.append(u)
+            if len(deduped) >= MAX_SEARCH_RESULTS:
+                break
+
+        self.search_cache.set(key, deduped)
+        return deduped
+
+    async def _search_urls_single(self, query: str, qtype: str = "claim") -> List[str]:
+        loop = asyncio.get_running_loop()
+
         loop = asyncio.get_running_loop()
 
         def _sync() -> List[str]:
             with DDGS() as ddgs:
-                rows = list(ddgs.text(claim, max_results=MAX_SEARCH_RESULTS))
+                rows = list(ddgs.text(query, max_results=MAX_SEARCH_RESULTS))
             return [r.get("href") for r in rows if r.get("href")]
 
         try:
@@ -301,18 +403,18 @@ class RetrievalPipeline:
                 timeout=max(HTTP_TIMEOUT_SECONDS, 3.0),
             )
         except Exception as exc:
-            logger.warning(f"Search failed/timeout for claim: {claim[:60]}... ({exc})")
+            logger.warning(f"Search failed/timeout for query: {query[:60]}... ({exc})")
             urls = []
 
         if not urls:
-            simplified = " ".join(re.findall(r"[a-zA-Z0-9]+", claim.lower())[:12]).strip()
-            if simplified and simplified != claim.lower().strip():
+            simplified = " ".join(re.findall(r"[a-zA-Z0-9]+", query.lower())[:12]).strip()
+            if simplified and simplified != query.lower().strip():
                 try:
                     telemetry.event(
                         "retrieval_search_retry",
                         stage="retrieval.search",
-                        message="retry with simplified query",
-                        payload={"query": simplified},
+                        message=f"retry with simplified query ({qtype})",
+                        payload={"query": simplified, "query_type": qtype},
                     )
 
                     def _sync_retry() -> List[str]:
@@ -327,7 +429,6 @@ class RetrievalPipeline:
                 except Exception:
                     urls = []
 
-        self.search_cache.set(key, urls)
         return urls
 
     async def _fetch_and_extract(self, url: str, document_id: str = "unknown-document", claim_key: str = "") -> Tuple[str, str, str, Dict[str, str], bool]:

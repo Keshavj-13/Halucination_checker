@@ -55,7 +55,9 @@ class SemanticVoter(Voter):
             else:
                 sim = self._fallback_similarity(claim, ev.snippet)
 
-            sim *= (0.7 + 0.3 * ev.reliability_score)
+            stance = (ev.stance or "mention").lower()
+            stance_mult = 1.0 if stance == "support" else 0.65 if stance == "neutral" else 0.35
+            sim *= (0.7 + 0.3 * ev.reliability_score) * stance_mult * (1.0 - min(max(ev.bias_penalty, 0.0), 1.0) * 0.25)
             best_sim = max(best_sim, sim)
             if sim == best_sim:
                 best_idx = idx

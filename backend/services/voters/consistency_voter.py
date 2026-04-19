@@ -190,15 +190,38 @@ class ConsistencyVoter(Voter):
         refute_idx = classes.index("refuted") if "refuted" in classes else min(1, probs.shape[1] - 1)
         uncertain_idx = classes.index("insufficient") if "insufficient" in classes else min(2, probs.shape[1] - 1)
 
-        best_i = int(np.argmax(probs[:, support_idx]))
-        support_conf = float(probs[best_i, support_idx])
-        refute_conf = float(probs[best_i, refute_idx])
-        uncertain_conf = float(probs[best_i, uncertain_idx])
+        weights = []
+        support_vals = []
+        refute_vals = []
+        uncertain_vals = []
+        for i, ev in enumerate(evidence):
+            rel = max(0.05, float(ev.reliability_score))
+            stance = (ev.stance or "mention").lower()
+            if stance in {"support"}:
+                stance_w = 1.15
+            elif stance in {"refute"}:
+                stance_w = 1.15
+            elif stance in {"neutral"}:
+                stance_w = 0.70
+            elif stance in {"quotation", "reported_belief", "mention"}:
+                stance_w = 0.35
+            else:
+                stance_w = 0.55
+            w = rel * stance_w * (1.0 - min(max(float(ev.bias_penalty), 0.0), 1.0) * 0.35)
+            weights.append(w)
+            support_vals.append(float(probs[i, support_idx]))
+            refute_vals.append(float(probs[i, refute_idx]))
+            uncertain_vals.append(float(probs[i, uncertain_idx]))
 
-        if support_conf >= max(refute_conf, uncertain_conf):
-            status = "Verified" if support_conf >= 0.55 else "Plausible"
+        wsum = max(1e-8, sum(weights))
+        support_conf = float(sum(v * w for v, w in zip(support_vals, weights)) / wsum)
+        refute_conf = float(sum(v * w for v, w in zip(refute_vals, weights)) / wsum)
+        uncertain_conf = float(sum(v * w for v, w in zip(uncertain_vals, weights)) / wsum)
+
+        if support_conf >= max(refute_conf, uncertain_conf) and support_conf >= 0.52:
+            status = "Verified"
             score = support_conf
-        elif refute_conf >= max(support_conf, uncertain_conf):
+        elif refute_conf >= max(support_conf, uncertain_conf) and refute_conf >= 0.52:
             status = "Hallucination"
             score = 1.0 - refute_conf
         else:
@@ -213,7 +236,7 @@ class ConsistencyVoter(Voter):
                 f"refuted={refute_conf:.2f}, insufficient={uncertain_conf:.2f}"
             ),
             "score": round(float(score), 4),
-            "metadata": {"best_evidence_idx": best_i},
+            "metadata": {"weighted": True, "num_evidence": len(evidence)},
         }
 
 

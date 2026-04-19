@@ -124,6 +124,31 @@ class VerificationOrchestrator:
             cluster_support=cluster_support,
         )
 
+        stance_support = sum(1 for ev in evidence if (ev.stance or "").lower() == "support")
+        stance_refute = sum(1 for ev in evidence if (ev.stance or "").lower() == "refute")
+        stance_mention = sum(1 for ev in evidence if (ev.stance or "").lower() in {"mention", "quotation", "reported_belief"})
+        n_ev = max(1, len(evidence))
+        support_ratio = stance_support / n_ev
+        refute_ratio = stance_refute / n_ev
+        mention_ratio = stance_mention / n_ev
+
+        # Mention is not endorsement: apply conservative downgrade when evidence is mostly mention/reporting.
+        if mention_ratio >= 0.60 and support_ratio < 0.15:
+            final_score = max(0.0, final_score - 0.16)
+
+        # Strong refuting stance distribution should pull score down even with lexical overlap.
+        if refute_ratio > support_ratio and refute_ratio >= 0.20:
+            final_score = max(0.0, final_score - 0.10)
+
+        if final_score >= 0.68:
+            final_status = "Verified"
+        elif final_score <= 0.38:
+            final_status = "Hallucination"
+        else:
+            final_status = "Plausible"
+
+        final_confidence = min(1.0, max(0.0, max(final_confidence, abs(final_score - 0.5) * 2.0)))
+
         best_evidence = sorted(evidence, key=lambda ev: ev.reliability_score, reverse=True)[:3]
         contradicting_evidence = [ev for ev in evidence if ev.support == "contradicting"][:3]
 
@@ -169,6 +194,9 @@ class VerificationOrchestrator:
                 "final_score": round(float(final_score), 4),
                 "confidence": round(float(final_confidence), 4),
                 "voting_runtime_ms": round(float(voting_runtime_ms), 2),
+                "stance_support_ratio": round(float(support_ratio), 3),
+                "stance_refute_ratio": round(float(refute_ratio), 3),
+                "stance_mention_ratio": round(float(mention_ratio), 3),
                 "voter_runtime_ms": voter_runtime_ms,
             },
         )
