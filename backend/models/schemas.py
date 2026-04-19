@@ -1,24 +1,88 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
+
+class EvidenceChunk(BaseModel):
+    text: str
+    start_char: int = 0
+    end_char: int = 0
+    token_count: int = 0
+    embedding: Optional[List[float]] = None
+
+
 class Evidence(BaseModel):
     title: str
     snippet: str
     url: str
-    support: str # "supporting", "contradicting", "weak"
-    reliability_score: float = 0.0 # 0.0 to 1.0
+    support: str  # "supporting", "contradicting", "weak"
+    reliability_score: float = 0.0  # 0.0 to 1.0
+    reliability_explanation: str = ""
+    source_domain: str = ""
+    published_at: Optional[str] = None
+    chunk_start: int = 0
+    chunk_end: int = 0
+    embedding: Optional[List[float]] = None
+    cluster_id: Optional[int] = None
+    page_quality_signals: Dict[str, float] = Field(default_factory=dict)
+
+
+class VoterResult(BaseModel):
+    status: str
+    confidence: float
+    reasoning: str
+    score: Optional[float] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeMetadata(BaseModel):
+    total_runtime_ms: float = 0.0
+    retrieval_runtime_ms: float = 0.0
+    voting_runtime_ms: float = 0.0
+    num_urls: int = 0
+    num_chunks: int = 0
+    cache_hits: int = 0
+    external_failures: List[str] = Field(default_factory=list)
+
 
 class Claim(BaseModel):
     text: str
-    status: str # "Verified", "Plausible", "Hallucination"
+    status: str  # "Verified", "Plausible", "Hallucination"
     confidence: float
     evidence: List[Evidence]
     start_idx: int = 0
     end_idx: int = 0
-    voter_scores: Dict[str, float] = {} # Individual scores from each voter
+    voter_scores: Dict[str, float] = Field(default_factory=dict)
+    voter_results: Dict[str, VoterResult] = Field(default_factory=dict)
+    final_score: float = 0.0
+    label: str = "Plausible"
+    best_evidence: List[Evidence] = Field(default_factory=list)
+    contradicting_evidence: List[Evidence] = Field(default_factory=list)
+    source_reliability_explanation: str = ""
+    runtime: RuntimeMetadata = Field(default_factory=RuntimeMetadata)
+
+
+class ClaimLogRecord(BaseModel):
+    document_id: str
+    claim_text: str
+    start_idx: int
+    end_idx: int
+    retrieved_urls: List[str] = Field(default_factory=list)
+    evidence_chunks: List[Evidence] = Field(default_factory=list)
+    source_reliability_scores: List[float] = Field(default_factory=list)
+    voter_scores: Dict[str, float] = Field(default_factory=dict)
+    voter_results: Dict[str, Any] = Field(default_factory=dict)
+    final_consensus_score: float
+    final_label: str
+    confidence: float
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
+    model_version: str = "cumulative-multilayer-ensemble-v1"
+    timestamp: str
+
 
 class AuditRequest(BaseModel):
     document: str
+    document_id: Optional[str] = None
+
 
 class AuditResponse(BaseModel):
     document: str

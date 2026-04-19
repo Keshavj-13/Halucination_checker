@@ -6,6 +6,7 @@ import re
 import asyncio
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
+from services.config import LLM_TIMEOUT_SECONDS
 
 load_dotenv()
 
@@ -59,6 +60,12 @@ class LLMClient:
             logger.error(f"Failed to parse JSON from: {text[:200]}...")
             raise ValueError("Invalid JSON format in model response")
 
+    def _sanitize_error(self, error: Exception) -> str:
+        msg = str(error)
+        msg = re.sub(r"([?&]key=)[^&\s]+", r"\1<redacted>", msg)
+        msg = re.sub(r"(Bearer\s+)[A-Za-z0-9_\-\.]+", r"\1<redacted>", msg)
+        return msg
+
     async def chat(self, prompt: str, system_prompt: str = "You are a helpful assistant.", retries: int = 2) -> str:
         logger.info(f"Calling LLM ({self.provider}/{self.model})")
         
@@ -85,7 +92,7 @@ class LLMClient:
 
         for attempt in range(retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
+                async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
                     if self.provider == "gemini":
                         response = await client.post(self.base_url, json=payload)
                     else:
@@ -102,11 +109,17 @@ class LLMClient:
                     logger.debug(f"Raw LLM Output: {content}")
                     return content
             except Exception as e:
+                safe_error = self._sanitize_error(e)
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code in {400, 401, 403, 404, 429}:
+                    logger.error(f"LLM non-retriable status {status_code}: {safe_error}")
+                    raise Exception(f"Failed to communicate with LLM: {safe_error}")
+
                 if attempt < retries:
-                    logger.warning(f"LLM attempt {attempt + 1} failed: {str(e)}. Retrying...")
+                    logger.warning(f"LLM attempt {attempt + 1} failed: {safe_error}. Retrying...")
                     await asyncio.sleep(1)
                     continue
-                logger.error(f"LLM Error after {retries + 1} attempts: {str(e)}")
-                raise Exception(f"Failed to communicate with LLM: {str(e)}")
+                logger.error(f"LLM Error after {retries + 1} attempts: {safe_error}")
+                raise Exception(f"Failed to communicate with LLM: {safe_error}")
 
 llm = LLMClient()

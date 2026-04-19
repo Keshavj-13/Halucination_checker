@@ -5,3 +5,13 @@ httpx
 python-dotenv
 duckduckgo-search
 ddgs
+beautifulsoup4
+lxml
+numpy
+scikit-learn
+joblib
+datasets
+pytest
+pytest-asyncio
+pytest-xdist
+tqdm

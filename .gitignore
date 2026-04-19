@@ -29,11 +29,17 @@ env/
 backend/.env
 backend/.env.*
 !backend/.env.example
+.env
 
 # Runtime artifacts / local data
 backend/data/training_data.jsonl
 backend/**/*.log
 *.log
+data/logs/*.jsonl
+data/cache/*.json
+data/cache/pages/*.json
+data/models/*.joblib
+data/processed/*.jsonl
 
 # --- Node / Frontend ---
 frontend/node_modules/

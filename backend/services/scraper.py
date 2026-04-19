@@ -3,41 +3,20 @@ import re
 import logging
 from typing import List, Dict
 from urllib.parse import urlparse
+from services.source_reliability import source_reliability_scorer
 
 logger = logging.getLogger("audit-api.scraper")
 
 class SourceScorer:
-    """Evaluates the reliability of a source website."""
-    
-    TRUSTED_DOMAINS = {
-        "gov": 1.0,
-        "edu": 0.95,
-        "org": 0.8,
-        "nature.com": 1.0,
-        "science.org": 1.0,
-        "reuters.com": 0.9,
-        "apnews.com": 0.9,
-        "bbc.co.uk": 0.9,
-        "wikipedia.org": 0.7, # Good for general, but not primary
-    }
+    """Backwards-compatible scorer API forwarding to multifactor scorer."""
 
     def score(self, url: str, content: str) -> float:
-        domain = urlparse(url).netloc.lower()
-        
-        # 1. Domain Score
-        score = 0.5 # Default
-        for trusted, val in self.TRUSTED_DOMAINS.items():
-            if domain.endswith(trusted):
-                score = val
-                break
-        
-        # 2. Content Quality (Heuristic)
-        if len(content) > 2000:
-            score += 0.1
-        if "references" in content.lower() or "citations" in content.lower():
-            score += 0.1
-            
-        return min(score, 1.0)
+        return source_reliability_scorer.score_page(
+            url=url,
+            title="Web Source",
+            text=content,
+            claim_text="",
+        ).score
 
 class WebScraper:
     """Simple scraper to extract main text from URLs."""

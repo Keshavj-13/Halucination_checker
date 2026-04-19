@@ -24,16 +24,18 @@ const DocumentViewer = ({ text, claims, onSelectClaim, selectedClaim }) => {
             const colorClass =
                 claim.status === "Verified" ? "border-b-2 border-green-500 bg-green-500/10" :
                     claim.status === "Hallucination" ? "border-b-2 border-red-500 bg-red-500/10" :
-                        "border-b-2 border-yellow-500 bg-yellow-500/10";
+                        claim.status === "Pending" ? "border-b-2 border-slate-600 bg-slate-700/10 animate-pulse" :
+                            "border-b-2 border-yellow-500 bg-yellow-500/10";
 
             const isSelected = selectedClaim && selectedClaim.start_idx === claim.start_idx;
+            const isPending = claim.status === "Pending";
 
             // Add the highlighted claim
             elements.push(
                 <span
                     key={`claim-${i}`}
-                    onClick={() => onSelectClaim(claim)}
-                    className={`${colorClass} cursor-pointer transition-all hover:brightness-125 ${isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900 rounded-sm' : ''}`}
+                    onClick={() => !isPending && onSelectClaim(claim)}
+                    className={`${colorClass} ${isPending ? 'cursor-wait' : 'cursor-pointer transition-all hover:brightness-125'} ${isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900 rounded-sm' : ''}`}
                     title={`${claim.status} (${Math.round(claim.confidence * 100)}%)`}
                 >
                     {text.substring(claim.start_idx, claim.end_idx)}

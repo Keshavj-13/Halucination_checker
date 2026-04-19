@@ -1,86 +1,233 @@
 import logging
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
-from models.schemas import Claim, Evidence
+from models.schemas import Claim, Evidence, RuntimeMetadata, VoterResult
 from services.voters.heuristic_voter import heuristic_voter
 from services.voters.semantic_voter import semantic_voter
 from services.voters.entity_voter import entity_voter
+from services.voters.consistency_voter import consistency_voter
 from services.voters.llm_voter import llm_voter
 from services.data_collector import data_collector
+from services.consensus_engine import consensus_engine
+from services.config import VOTER_CPU_WORKERS, VOTER_TIMEOUT_SECONDS, VOTERS_SERIAL_MODE
+from services.telemetry import telemetry
 
 logger = logging.getLogger("audit-api.orchestrator")
 
+
 class VerificationOrchestrator:
     """
-    Orchestrates the ensemble of voters and calculates weighted consensus.
+    Orchestrates the ensemble and calibrated consensus computation.
     """
-    
-    WEIGHTS = {
-        "heuristic": 0.3,
-        "semantic": 0.3,
-        "entity": 0.2,
-        "llm": 0.2
-    }
 
-    async def verify_multilayer(self, text: str, evidence: List[Evidence]) -> Claim:
+    def __init__(self):
+        self._cpu_voter_pool = ThreadPoolExecutor(max_workers=VOTER_CPU_WORKERS)
+
+    async def _run_cpu_voter(self, voter, text: str, evidence: List[Evidence]):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._cpu_voter_pool,
+            lambda: asyncio.run(voter.vote(text, evidence)),
+        )
+
+    async def _timed(self, name: str, coro, timeout_s: float):
+        started = asyncio.get_event_loop().time()
+        try:
+            result = await asyncio.wait_for(coro, timeout=max(timeout_s, 0.5))
+        except Exception as exc:
+            result = exc
+        elapsed_ms = (asyncio.get_event_loop().time() - started) * 1000.0
+        return name, result, elapsed_ms
+
+    async def verify_multilayer(
+        self,
+        text: str,
+        evidence: List[Evidence],
+        document_id: str = "unknown-document",
+        claim_key: str = "",
+        start_idx: int = 0,
+        end_idx: int = 0,
+        urls: List[str] | None = None,
+        retrieval_runtime_ms: float = 0.0,
+        retrieval_cache_hits: int = 0,
+        retrieval_failures: List[str] | None = None,
+        retrieval_num_clusters: int | None = None,
+        retrieval_independent_clusters: int | None = None,
+        retrieval_cluster_support: float | None = None,
+    ) -> Claim:
         logger.info(f"Running ensemble for: {text[:50]}...")
-        
-        # 1. Run all voters in parallel
-        voter_names = ["heuristic", "semantic", "entity", "llm"]
-        voter_coroutines = [
-            heuristic_voter.vote(text, evidence),
-            semantic_voter.vote(text, evidence),
-            entity_voter.vote(text, evidence),
-            llm_voter.vote(text, evidence),
-        ]
+        telemetry.event("voting_start", document_id=document_id, claim_key=claim_key, stage="voting", message="ensemble voting started", payload={"num_evidence": len(evidence)})
 
-        raw_results = await asyncio.gather(*voter_coroutines, return_exceptions=True)
+        voting_started = asyncio.get_event_loop().time()
+        timeout_s = max(VOTER_TIMEOUT_SECONDS, 0.5)
+        if VOTERS_SERIAL_MODE:
+            raw_results = [
+                await self._timed("heuristic", self._run_cpu_voter(heuristic_voter, text, evidence), timeout_s),
+                await self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s),
+                await self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s),
+                await self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s),
+                await self._timed("llm", llm_voter.vote(text, evidence), timeout_s),
+            ]
+        else:
+            voter_tasks = [
+                asyncio.create_task(self._timed("heuristic", self._run_cpu_voter(heuristic_voter, text, evidence), timeout_s)),
+                asyncio.create_task(self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s)),
+                asyncio.create_task(self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s)),
+                asyncio.create_task(self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s)),
+                asyncio.create_task(self._timed("llm", llm_voter.vote(text, evidence), timeout_s)),
+            ]
+
+            raw_results = await asyncio.gather(*voter_tasks, return_exceptions=True)
         results = {}
-        for name, result in zip(voter_names, raw_results):
+        voter_runtime_ms = {}
+        for result in raw_results:
             if isinstance(result, Exception):
-                logger.error(f"Voter {name} failed: {str(result)}")
+                logger.error(f"Timed voter wrapper failed: {str(result)}")
+                telemetry.event("voter_wrapper_error", document_id=document_id, claim_key=claim_key, stage="voting", message=str(result))
+                continue
+
+            name, voter_result, elapsed_ms = result
+            voter_runtime_ms[name] = round(float(elapsed_ms), 2)
+            if isinstance(voter_result, Exception):
+                logger.error(f"Voter {name} failed: {str(voter_result)}")
+                telemetry.event("voter_error", document_id=document_id, claim_key=claim_key, stage=f"voting.{name}", message=str(voter_result), payload={"runtime_ms": round(float(elapsed_ms), 2)})
                 results[name] = {
                     "status": "Plausible",
                     "confidence": 0.0,
                     "reasoning": "Voter failed during verification.",
                 }
             else:
-                results[name] = result
+                results[name] = voter_result
+                telemetry.event(
+                    "voter_done",
+                    document_id=document_id,
+                    claim_key=claim_key,
+                    stage=f"voting.{name}",
+                    message="voter completed",
+                    payload={
+                        "runtime_ms": round(float(elapsed_ms), 2),
+                        "status": voter_result.get("status", "Plausible"),
+                        "confidence": float(voter_result.get("confidence", 0.0)),
+                    },
+                )
 
-        # 2. Calculate Weighted Consensus
-        final_score = 0.0
-        status_counts = {"Verified": 0, "Plausible": 0, "Hallucination": 0}
-        
-        for name, res in results.items():
-            weight = self.WEIGHTS.get(name, 0.1)
-            
-            # Map status to score
-            status_val = 1.0 if res["status"] == "Verified" else (0.5 if res["status"] == "Plausible" else 0.0)
-            final_score += status_val * weight
-            status_counts[res["status"]] = status_counts.get(res["status"], 0) + 1
-
-        # 3. Incorporate Source Reliability
-        avg_reliability = sum([ev.reliability_score for ev in evidence]) / len(evidence) if evidence else 0.5
-        # Final confidence is a mix of voter consensus and source reliability
-        final_confidence = (final_score * 0.7) + (avg_reliability * 0.3)
-        
-        # Determine final status based on blended confidence
-        if final_confidence > 0.75:
-            final_status = "Verified"
-        elif final_confidence > 0.35:
-            final_status = "Plausible"
+        avg_reliability = sum(ev.reliability_score for ev in evidence) / len(evidence) if evidence else 0.0
+        if retrieval_cluster_support is None:
+            cluster_support = self._cluster_support_score(evidence)
         else:
-            final_status = "Hallucination"
+            cluster_support = retrieval_cluster_support
 
-        # 4. Collect Data
-        data_collector.collect(text, evidence, results)
-        
+        final_score, final_confidence, final_status, normalized_voter_scores = consensus_engine.combine(
+            voter_results=results,
+            source_reliability=avg_reliability,
+            cluster_support=cluster_support,
+        )
+
+        best_evidence = sorted(evidence, key=lambda ev: ev.reliability_score, reverse=True)[:3]
+        contradicting_evidence = [ev for ev in evidence if ev.support == "contradicting"][:3]
+
+        voting_runtime_ms = (asyncio.get_event_loop().time() - voting_started) * 1000.0
+        runtime_metadata = {
+            "retrieval_runtime_ms": retrieval_runtime_ms,
+            "voting_runtime_ms": voting_runtime_ms,
+            "voter_runtime_ms": voter_runtime_ms,
+            "num_urls": len(urls or []),
+            "num_chunks": len(evidence),
+            "num_clusters": retrieval_num_clusters if retrieval_num_clusters is not None else self._count_clusters(evidence),
+            "independent_clusters": (
+                retrieval_independent_clusters
+                if retrieval_independent_clusters is not None
+                else self._count_independent_clusters(evidence)
+            ),
+            "cluster_support": cluster_support,
+            "cache_hits": retrieval_cache_hits,
+            "external_failures": retrieval_failures or [],
+        }
+
+        data_collector.collect_raw(
+            document_id=document_id,
+            claim_text=text,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            urls=urls or [],
+            evidence=evidence,
+            voter_results=results,
+            final_score=final_score,
+            final_label=final_status,
+            confidence=final_confidence,
+            runtime_metadata=runtime_metadata,
+        )
+        telemetry.event(
+            "voting_done",
+            document_id=document_id,
+            claim_key=claim_key,
+            stage="voting",
+            message="ensemble voting completed",
+            payload={
+                "final_status": final_status,
+                "final_score": round(float(final_score), 4),
+                "confidence": round(float(final_confidence), 4),
+                "voting_runtime_ms": round(float(voting_runtime_ms), 2),
+                "voter_runtime_ms": voter_runtime_ms,
+            },
+        )
+
         return Claim(
             text=text,
             status=final_status,
-            confidence=round(final_confidence, 2),
+            label=final_status,
+            final_score=round(final_score, 4),
+            confidence=round(final_confidence, 4),
             evidence=evidence,
-            voter_scores={name: round(float(res.get("confidence", 0.0)), 2) for name, res in results.items()}
+            voter_scores={name: round(float(score), 4) for name, score in normalized_voter_scores.items()},
+            voter_results={
+                name: VoterResult(
+                    status=res.get("status", "Plausible"),
+                    confidence=float(res.get("confidence", 0.0)),
+                    reasoning=res.get("reasoning", ""),
+                    score=res.get("score"),
+                    metadata=res.get("metadata", {}),
+                )
+                for name, res in results.items()
+            },
+            best_evidence=best_evidence,
+            contradicting_evidence=contradicting_evidence,
+            source_reliability_explanation=(
+                f"avg_source_reliability={avg_reliability:.2f}, cluster_support={cluster_support:.2f}, "
+                f"num_clusters={runtime_metadata['num_clusters']}, "
+                f"independent_clusters={runtime_metadata['independent_clusters']}"
+            ),
+            runtime=RuntimeMetadata(
+                total_runtime_ms=round(retrieval_runtime_ms + voting_runtime_ms, 2),
+                retrieval_runtime_ms=round(retrieval_runtime_ms, 2),
+                voting_runtime_ms=round(voting_runtime_ms, 2),
+                num_urls=len(urls or []),
+                num_chunks=len(evidence),
+                cache_hits=retrieval_cache_hits,
+                external_failures=retrieval_failures or [],
+            ),
         )
+
+    def _cluster_support_score(self, evidence: List[Evidence]) -> float:
+        if not evidence:
+            return 0.0
+        num_clusters = self._count_clusters(evidence)
+        independent = self._count_independent_clusters(evidence)
+        if num_clusters <= 1:
+            return 0.35
+        return min(0.35 + 0.2 * (num_clusters - 1) + 0.1 * max(0, independent - 1), 1.0)
+
+    def _count_clusters(self, evidence: List[Evidence]) -> int:
+        cluster_ids = {ev.cluster_id for ev in evidence if ev.cluster_id is not None}
+        return len(cluster_ids) if cluster_ids else 0
+
+    def _count_independent_clusters(self, evidence: List[Evidence]) -> int:
+        by_cluster: Dict[int, set[str]] = {}
+        for ev in evidence:
+            if ev.cluster_id is None:
+                continue
+            by_cluster.setdefault(ev.cluster_id, set()).add(ev.source_domain or "")
+        return sum(1 for domains in by_cluster.values() if len([d for d in domains if d]) >= 1)
 
 orchestrator = VerificationOrchestrator()

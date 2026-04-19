@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { runAuditStream, loadSample } from "./api";
 import Summary from "./components/Summary";
 import DocumentViewer from "./components/DocumentViewer";
@@ -10,22 +10,62 @@ function App() {
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState("");
     const [selectedClaim, setSelectedClaim] = useState(null);
+    const [progress, setProgress] = useState({ completed: 0, total: 0 });
+    const [resources, setResources] = useState(null);
+    const [scrapeStats, setScrapeStats] = useState({ urls_discovered: 0, started: 0, done: 0, cache_hits: 0, failed: 0 });
+    const streamAbortRef = useRef(null);
+
+    useEffect(() => {
+        if (!selectedClaim || !data?.claims?.length) return;
+        const fresh = data.claims.find(
+            (c) => c.start_idx === selectedClaim.start_idx && c.end_idx === selectedClaim.end_idx
+        );
+        if (fresh && fresh !== selectedClaim) {
+            setSelectedClaim(fresh);
+        }
+    }, [data?.claims, selectedClaim]);
+
+    const mergeClaim = (existingClaims, incomingClaim) => {
+        const idx = existingClaims.findIndex(
+            (c) => c.start_idx === incomingClaim.start_idx && c.end_idx === incomingClaim.end_idx
+        );
+        if (idx === -1) return [...existingClaims, incomingClaim];
+        const next = [...existingClaims];
+        next[idx] = incomingClaim;
+        return next;
+    };
 
     const handleAudit = async () => {
         if (!document.trim()) return;
 
+        if (streamAbortRef.current) {
+            streamAbortRef.current.abort();
+        }
+        const controller = new AbortController();
+        streamAbortRef.current = controller;
+
         setLoading(true);
         setData({ claims: [], total: 0, verified: 0, plausible: 0, hallucinations: 0 });
         setStatus("Analyzing document structure...");
+        setProgress({ completed: 0, total: 0 });
+        setResources(null);
+        setScrapeStats({ urls_discovered: 0, started: 0, done: 0, cache_hits: 0, failed: 0 });
         setSelectedClaim(null);
 
         await runAuditStream(document, (update) => {
             if (update.type === "start") {
                 setData(prev => ({ ...prev, total: update.total }));
                 setStatus(`Verifying ${update.total} claims...`);
+                setProgress({ completed: 0, total: update.total });
+            } else if (update.type === "resources") {
+                setResources(update.resources || null);
+            } else if (update.type === "stage") {
+                setStatus(update.message || "Processing...");
+            } else if (update.type === "claims_extracted") {
+                setData(prev => ({ ...prev, claims: update.claims || [] }));
             } else if (update.type === "claim") {
                 setData(prev => {
-                    const newClaims = [...prev.claims, update.claim];
+                    const newClaims = mergeClaim(prev.claims || [], update.claim);
                     const verified = newClaims.filter(c => c.status === "Verified").length;
                     const plausible = newClaims.filter(c => c.status === "Plausible").length;
                     const hallucinations = newClaims.filter(c => c.status === "Hallucination").length;
@@ -37,14 +77,66 @@ function App() {
                         hallucinations
                     };
                 });
+                setSelectedClaim((prev) => {
+                    if (!prev) return update.claim;
+                    if (prev.start_idx === update.claim.start_idx && prev.end_idx === update.claim.end_idx) {
+                        return update.claim;
+                    }
+                    return prev;
+                });
+                setProgress({ completed: update.completed || 0, total: update.total || 0 });
+            } else if (update.type === "progress") {
+                setData(prev => ({
+                    ...prev,
+                    verified: update.verified ?? prev.verified,
+                    plausible: update.plausible ?? prev.plausible,
+                    hallucinations: update.hallucinations ?? prev.hallucinations,
+                }));
+                if (update.scrape) {
+                    setScrapeStats(update.scrape);
+                }
+                setProgress({ completed: update.completed || 0, total: update.total || 0 });
+                setStatus(`Verified ${update.completed || 0}/${update.total || 0} claims...`);
+            } else if (update.type === "heartbeat") {
+                setProgress({ completed: update.completed || 0, total: update.total || 0 });
+                const inflight = update.in_flight ?? 0;
+                const s = update.scrape || scrapeStats;
+                if (update.scrape) {
+                    setScrapeStats(update.scrape);
+                }
+                setStatus(
+                    `Running... ${update.completed || 0}/${update.total || 0} completed, ${inflight} in-flight · scraping ${s.done || 0}/${s.urls_discovered || 0} (cache ${s.cache_hits || 0}, fail ${s.failed || 0})`
+                );
             } else if (update.type === "done") {
                 setLoading(false);
-                setStatus("");
+                setProgress({ completed: update.total || progress.total, total: update.total || progress.total });
+                setStatus("Completed");
+            } else if (update.type === "stream_end") {
+                setLoading(false);
+                setStatus("Completed");
+            } else if (update.type === "cancelled") {
+                setLoading(false);
+                setStatus("Cancelled");
             } else if (update.type === "error") {
                 setLoading(false);
                 setStatus("Error: " + update.message);
             }
-        });
+        }, controller.signal);
+
+        if (streamAbortRef.current === controller) {
+            streamAbortRef.current = null;
+        }
+    };
+
+    const handleBackToEditor = () => {
+        if (streamAbortRef.current) {
+            streamAbortRef.current.abort();
+            streamAbortRef.current = null;
+        }
+        setLoading(false);
+        setStatus("");
+        setData(null);
+        setSelectedClaim(null);
     };
 
     const handleLoadSample = async () => {
@@ -55,6 +147,7 @@ function App() {
         setDocument(result.document);
         setLoading(false);
         setStatus("");
+        setProgress({ completed: result.total || 0, total: result.total || 0 });
         setSelectedClaim(null);
     };
 
@@ -86,7 +179,7 @@ function App() {
             <main className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
                 {/* Input & Viewer Column */}
                 <div className="lg:col-span-8 space-y-6">
-                    {!data || data.claims.length === 0 ? (
+                    {!data ? (
                         <div className="bg-gray-900 rounded-2xl p-6 shadow-xl border border-gray-800">
                             <textarea
                                 className="w-full h-64 bg-gray-950 text-gray-100 p-6 rounded-xl border border-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none text-lg font-serif leading-relaxed"
@@ -112,6 +205,20 @@ function App() {
                         </div>
                     ) : (
                         <>
+                            <div className="bg-gray-900 rounded-2xl p-4 border border-gray-800 text-sm text-gray-300 flex items-center justify-between">
+                                <span>{status || "Ready"}</span>
+                                <div className="flex items-center gap-4">
+                                    {resources && (
+                                        <span className="font-mono text-[11px] text-cyan-300">
+                                            C:{resources.max_claims_in_flight} V:{resources.voter_cpu_workers} S:{resources.scrape_concurrency} G:{resources.ollama_num_gpu}
+                                        </span>
+                                    )}
+                                    <span className="font-mono text-[11px] text-amber-300">
+                                        scrape {scrapeStats.done}/{scrapeStats.urls_discovered} c{scrapeStats.cache_hits} f{scrapeStats.failed}
+                                    </span>
+                                    <span className="font-mono text-gray-400">{progress.completed}/{progress.total || data.total || 0}</span>
+                                </div>
+                            </div>
                             <Summary data={data} />
                             <DocumentViewer
                                 text={document}
@@ -120,7 +227,7 @@ function App() {
                                 selectedClaim={selectedClaim}
                             />
                             <button
-                                onClick={() => setData(null)}
+                                onClick={handleBackToEditor}
                                 className="text-gray-500 hover:text-gray-300 text-sm font-bold flex items-center gap-2 transition-colors"
                             >
                                 ← Back to Editor
@@ -131,7 +238,7 @@ function App() {
 
                 {/* Side Dashboard Column */}
                 <div className="lg:col-span-4 sticky top-8 h-[calc(100vh-8rem)]">
-                    <DetailPanel claim={selectedClaim} />
+                    <DetailPanel claim={selectedClaim} loading={loading} status={status} progress={progress} resources={resources} scrapeStats={scrapeStats} />
                 </div>
             </main>
         </div>

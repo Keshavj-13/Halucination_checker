@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8000";
+const BASE = import.meta.env.VITE_API_BASE || window.location.origin;
 
 const FALLBACK = {
     document:
@@ -33,12 +33,13 @@ export async function runAudit(document) {
     return data ?? FALLBACK;
 }
 
-export async function runAuditStream(document, onUpdate) {
+export async function runAuditStream(document, onUpdate, signal) {
     try {
         const response = await fetch(`${BASE}/audit/stream`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ document }),
+            signal,
         });
 
         if (!response.ok) throw new Error("Stream failed");
@@ -46,6 +47,7 @@ export async function runAuditStream(document, onUpdate) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let terminalSeen = false;
 
         while (true) {
             const { value, done } = await reader.read();
@@ -58,11 +60,22 @@ export async function runAuditStream(document, onUpdate) {
             for (const line of lines) {
                 if (line.startsWith("data: ")) {
                     const data = JSON.parse(line.replace("data: ", ""));
+                    if (data.type === "done" || data.type === "error") {
+                        terminalSeen = true;
+                    }
                     onUpdate(data);
                 }
             }
         }
+
+        if (!terminalSeen) {
+            onUpdate({ type: "stream_end" });
+        }
     } catch (err) {
+        if (err?.name === "AbortError") {
+            onUpdate({ type: "cancelled", message: "Request cancelled" });
+            return;
+        }
         console.error("Streaming error:", err);
         onUpdate({ type: "error", message: err.message });
     }
