@@ -7,7 +7,7 @@ from services.voters.heuristic_voter import heuristic_voter
 from services.voters.semantic_voter import semantic_voter
 from services.voters.entity_voter import entity_voter
 from services.voters.consistency_voter import consistency_voter
-from services.voters.llm_voter import llm_voter
+from services.voters.deterministic_voter import deterministic_voter
 from services.data_collector import data_collector
 from services.consensus_engine import consensus_engine
 from services.config import VOTER_CPU_WORKERS, VOTER_TIMEOUT_SECONDS, VOTERS_SERIAL_MODE
@@ -67,7 +67,7 @@ class VerificationOrchestrator:
                 await self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s),
                 await self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s),
                 await self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s),
-                await self._timed("llm", llm_voter.vote(text, evidence), timeout_s),
+                await self._timed("deterministic", self._run_cpu_voter(deterministic_voter, text, evidence), timeout_s),
             ]
         else:
             voter_tasks = [
@@ -75,7 +75,7 @@ class VerificationOrchestrator:
                 asyncio.create_task(self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s)),
                 asyncio.create_task(self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s)),
                 asyncio.create_task(self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s)),
-                asyncio.create_task(self._timed("llm", llm_voter.vote(text, evidence), timeout_s)),
+                asyncio.create_task(self._timed("deterministic", self._run_cpu_voter(deterministic_voter, text, evidence), timeout_s)),
             ]
 
             raw_results = await asyncio.gather(*voter_tasks, return_exceptions=True)
@@ -140,12 +140,21 @@ class VerificationOrchestrator:
         if refute_ratio > support_ratio and refute_ratio >= 0.20:
             final_score = max(0.0, final_score - 0.10)
 
-        if final_score >= 0.68:
-            final_status = "Verified"
-        elif final_score <= 0.38:
+        det = results.get("deterministic", {})
+        det_status = str(det.get("status", "Plausible"))
+        det_meta = det.get("metadata", {}) if isinstance(det.get("metadata", {}), dict) else {}
+        det_label = str(det_meta.get("deterministic_label", ""))
+
+        # Honor strict deterministic overrides.
+        if bool(det_meta.get("strong_refute_override", False)):
             final_status = "Hallucination"
-        else:
+            final_score = min(final_score, 0.22)
+        elif det_label in {"Uncertain", "Conflicting"} and final_status == "Verified":
             final_status = "Plausible"
+            final_score = min(final_score, 0.62)
+        elif det_status == "Verified" and mention_ratio >= 0.65:
+            final_status = "Plausible"
+            final_score = min(final_score, 0.60)
 
         final_confidence = min(1.0, max(0.0, max(final_confidence, abs(final_score - 0.5) * 2.0)))
 

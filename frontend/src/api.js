@@ -1,4 +1,23 @@
-const BASE = (import.meta.env.VITE_API_BASE || window.location.origin).replace(/\/$/, "");
+function resolveApiBase() {
+    const configured = (import.meta.env.VITE_API_BASE || "").trim();
+    if (configured) {
+        return configured.replace(/\/$/, "");
+    }
+
+    const host = window.location.hostname;
+    const port = window.location.port;
+    const isLocal = host === "localhost" || host === "127.0.0.1";
+    const isLikelyVitePort = port === "5173" || port === "4173" || port === "3000";
+
+    // Local frontend dev commonly runs on 5173 while backend runs on 8000.
+    if (isLocal && isLikelyVitePort) {
+        return "http://127.0.0.1:8000";
+    }
+
+    return window.location.origin.replace(/\/$/, "");
+}
+
+const BASE = resolveApiBase();
 
 const FALLBACK = {
     document:
@@ -63,17 +82,25 @@ async function readError(response) {
 
 async function requestJson(path, { method = "GET", body, token, signal } = {}) {
     const isFormData = body instanceof FormData;
-    const response = await fetch(buildUrl(path), {
-        method,
-        headers: buildHeaders({ token, json: body !== undefined && !isFormData }),
-        body:
-            body === undefined
-                ? undefined
-                : isFormData
-                    ? body
-                    : JSON.stringify(body),
-        signal,
-    });
+    let response;
+    try {
+        response = await fetch(buildUrl(path), {
+            method,
+            headers: buildHeaders({ token, json: body !== undefined && !isFormData }),
+            body:
+                body === undefined
+                    ? undefined
+                    : isFormData
+                        ? body
+                        : JSON.stringify(body),
+            signal,
+        });
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw error;
+        }
+        throw new Error(`Could not reach API at ${BASE}. Start backend or set VITE_API_BASE.`);
+    }
 
     if (!response.ok) {
         throw new Error(await readError(response));

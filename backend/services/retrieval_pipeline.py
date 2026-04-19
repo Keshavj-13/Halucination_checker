@@ -39,6 +39,41 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("audit-api.retrieval")
 
+REPORTED_PATTERNS = re.compile(
+    r"\b(some people believe|some believe|it is claimed|the theory|reportedly|allegedly|is said to|according to|"
+    r"rumor|unconfirmed|speculation|analysts say|commentators say|observers say|it appears|it seems|"
+    r"is believed|is thought|purportedly|claims? that|suggests that|early reports?)\b"
+)
+REFUTE_PATTERNS = re.compile(
+    r"\b(false|incorrect|debunked|no evidence|not true|myth|refute|refutes|refuted|contradict|contradicts|"
+    r"contradicted|fabricated|unsupported|misleading|inaccurate|wrong|hoax|fake|denied|rebutted|"
+    r"fails? to|cannot be verified|retracted|withdrawn|unfounded|baseless|counterevidence|counter-evidence)\b"
+)
+SUPPORT_PATTERNS = re.compile(
+    r"\b(is|equals?|show(s|ed)?|demonstrate(s|d)?|confirm(s|ed)?|evidence indicates|measured|observed|"
+    r"verified|validated|documented|recorded|official|published|peer reviewed|peer-reviewed|"
+    r"data show(s|ed)?|study found|according to data|census|registry|public record|court record|"
+    r"statistically significant|replicated|reproducible|corroborated)\b"
+)
+
+QUERY_SUFFIXES = [
+    "fact check true or false",
+    "why false debunked",
+    "official source data",
+    "evidence study report",
+    "peer reviewed evidence",
+    "government data",
+    "site:gov",
+    "site:edu",
+    "source documents",
+    "meta analysis",
+    "systematic review",
+    "counter evidence",
+    "rebuttal",
+    "methodology",
+    "dataset",
+]
+
 
 def _tokenize(text: str) -> List[str]:
     return re.findall(r"\w+", text)
@@ -57,9 +92,9 @@ def _infer_chunk_metadata(claim: str, snippet: str) -> Dict[str, Any]:
 
     lower = snippet.lower()
     quote = '"' in snippet or "“" in snippet or "”" in snippet
-    reported = bool(re.search(r"\b(some people believe|it is claimed|reportedly|allegedly|is said to|according to)\b", lower))
-    refute_cue = bool(re.search(r"\b(false|incorrect|debunked|no evidence|not true|myth|refute|contradict)\b", lower))
-    support_cue = bool(re.search(r"\b(show(s|ed)?|demonstrate(s|d)?|confirm(s|ed)?|evidence indicates|measured|observed)\b", lower))
+    reported = bool(REPORTED_PATTERNS.search(lower))
+    refute_cue = bool(REFUTE_PATTERNS.search(lower))
+    support_cue = bool(SUPPORT_PATTERNS.search(lower))
 
     stance = "mention"
     citation_direction = "none"
@@ -363,11 +398,9 @@ class RetrievalPipeline:
         if cached:
             return cached[:MAX_SEARCH_RESULTS]
 
-        queries = [
-            ("claim", claim),
-            ("verify", f"{claim} fact check true or false"),
-            ("counter", f"{claim} why false debunked"),
-        ]
+        queries = [("claim", claim)]
+        for suffix in QUERY_SUFFIXES:
+            queries.append(("expanded", f"{claim} {suffix}"))
 
         all_urls: List[str] = []
         for qtype, q in queries:

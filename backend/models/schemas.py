@@ -26,6 +26,9 @@ class Evidence(BaseModel):
     chunk_end: int = 0
     embedding: Optional[List[float]] = None
     cluster_id: Optional[int] = None
+    relation_match: float = 0.0
+    entity_match: float = 0.0
+    numeric_match: float = 0.0
     bias_penalty: float = 0.0
     sponsorship_flag: bool = False
     is_quote: bool = False

@@ -6,6 +6,7 @@ from typing import List
 from models.schemas import Claim
 from services.verification_orchestrator import orchestrator
 from services.retrieval_pipeline import retrieval_pipeline
+from services.trusted_verifier import verify_with_trusted_knowledge
 from services.data_collector import data_collector
 from services.config import CLAIM_PIPELINE_DEADLINE_SECONDS, MAX_CLAIMS_IN_FLIGHT, VOTING_TIMEOUT_SECONDS, RETRIEVAL_STAGE_TIMEOUT_SECONDS, PIPELINE_SERIAL_MODE, PIPELINE_PROCESS_MODE, CLAIM_PROCESS_WORKERS
 from services.telemetry import telemetry
@@ -65,11 +66,65 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
 
     async def _run_once(retrieval_timeout_s: float, voting_timeout_s: float, attempt: int) -> Claim:
         nonlocal active_stage
+        trusted = verify_with_trusted_knowledge(text)
+        telemetry.event(
+            "claim_trusted_check_done",
+            document_id=document_id,
+            claim_key=claim_key,
+            stage="trusted",
+            message=f"trusted check domain={trusted.domain}",
+            payload={
+                "domain": trusted.domain,
+                "relation": trusted.relation,
+                "entities": trusted.entities[:6],
+                "numeric_values": trusted.numeric_values[:6],
+                "units": trusted.units[:6],
+                "status": trusted.status,
+                "confidence": trusted.confidence,
+                "reason": trusted.reason,
+                "insufficient": trusted.insufficient,
+            },
+        )
+
+        if trusted.status in {"Verified", "Hallucination"} and trusted.confidence >= 0.98 and trusted.evidence:
+            short = Claim(
+                text=text,
+                status=trusted.status,
+                label=trusted.status,
+                final_score=1.0 if trusted.status == "Verified" else 0.0,
+                confidence=trusted.confidence,
+                evidence=trusted.evidence,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                source_reliability_explanation=f"trusted_layer domain={trusted.domain} reason={trusted.reason}",
+            )
+            telemetry.event(
+                "claim_short_circuit_trusted",
+                document_id=document_id,
+                claim_key=claim_key,
+                stage="trusted",
+                message=f"short-circuit via trusted layer ({trusted.status})",
+                payload={"confidence": trusted.confidence, "domain": trusted.domain, "reason": trusted.reason},
+            )
+            return short
+
         retrieval_started = time.perf_counter()
         retrieval = await asyncio.wait_for(
             retrieval_pipeline.retrieve(text, document_id=document_id, claim_key=claim_key),
             timeout=retrieval_timeout_s,
         )
+
+        combined_evidence = list(trusted.evidence)
+        seen = {(ev.url, ev.snippet) for ev in combined_evidence}
+        for ev in retrieval.evidence:
+            key = (ev.url, ev.snippet)
+            if key in seen:
+                continue
+            seen.add(key)
+            combined_evidence.append(ev)
+
+        if trusted.evidence and combined_evidence:
+            retrieval.evidence = combined_evidence
         telemetry.event(
             "claim_retrieval_done",
             document_id=document_id,
@@ -83,6 +138,7 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
                 "cache_hits": retrieval.cache_hits,
                 "failures": retrieval.failures,
                 "attempt": attempt,
+                "trusted_seeded_evidence": len(trusted.evidence),
             },
         )
 
