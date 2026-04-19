@@ -93,6 +93,29 @@ class AuditRequest(BaseModel):
     document_id: Optional[str] = None
 
 
+class TextExtractionResponse(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    characters: int
+    text: str
+
+
+class CredentialsRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserProfile(BaseModel):
+    id: int
+    username: str
+    created_at: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserProfile
+
+
 class AuditResponse(BaseModel):
     document: str
     total: int
@@ -100,3 +123,24 @@ class AuditResponse(BaseModel):
     plausible: int
     hallucinations: int
     claims: List[Claim]
+
+
+class HistorySummary(BaseModel):
+    id: int
+    title: str
+    preview: str
+    created_at: str
+    total: int
+    verified: int
+    plausible: int
+    hallucinations: int
+    source_name: Optional[str] = None
+
+
+class HistoryDetail(BaseModel):
+    id: int
+    title: str
+    preview: str
+    created_at: str
+    source_name: Optional[str] = None
+    audit: AuditResponse

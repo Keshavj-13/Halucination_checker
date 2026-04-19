@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from models.schemas import AuditRequest, AuditResponse
 from services.claim_extractor import extract_claims
 from services.verifier import verify_claims, verify_claim
 from services.retrieval_pipeline import retrieval_pipeline
 from services.verification_orchestrator import orchestrator
+from services.auth_store import auth_store
 from services.config import (
     CPU_WORKERS,
     VOTER_CPU_WORKERS,
@@ -25,13 +26,31 @@ import json
 import uuid
 import time
 import asyncio
+from typing import Optional
 from services.telemetry import telemetry
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 logger = logging.getLogger("audit-api.routes")
 
+
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+def _resolve_authenticated_user_id(request: Request) -> Optional[int]:
+    token = _extract_bearer_token(request)
+    if not token:
+        return None
+
+    user = auth_store.get_user_by_token(token)
+    return user.id if user is not None else None
+
 @router.post("/", response_model=AuditResponse)
-async def run_audit(body: AuditRequest):
+async def run_audit(body: AuditRequest, request: Request):
     logger.info(f"Received audit request for document length: {len(body.document)}")
     document_id = body.document_id or str(uuid.uuid4())
     started = time.perf_counter()
@@ -65,7 +84,7 @@ async def run_audit(body: AuditRequest):
         },
     )
     
-    return AuditResponse(
+    response = AuditResponse(
         document=body.document,
         total=len(verified_claims),
         verified=verified,
@@ -74,10 +93,20 @@ async def run_audit(body: AuditRequest):
         claims=verified_claims
     )
 
+    user_id = _resolve_authenticated_user_id(request)
+    if user_id is not None:
+        try:
+            auth_store.save_audit_history(user_id=user_id, audit=response)
+        except Exception:
+            logger.exception("Failed to save audit history")
+
+    return response
+
 @router.post("/stream")
-async def run_audit_stream(body: AuditRequest):
+async def run_audit_stream(body: AuditRequest, request: Request):
     logger.info(f"Received streaming audit request")
     document_id = body.document_id or str(uuid.uuid4())
+    user_id = _resolve_authenticated_user_id(request)
     telemetry.event("audit_stream_start", document_id=document_id, stage="stream", message="streaming request started", payload={"document_len": len(body.document)})
     
     async def event_generator():
@@ -113,6 +142,7 @@ async def run_audit_stream(body: AuditRequest):
             verified = 0
             plausible = 0
             hallucinations = 0
+            finalized_claims = []
 
             async def _run_claim(c: dict):
                 telemetry.event(
@@ -141,6 +171,7 @@ async def run_audit_stream(body: AuditRequest):
                         plausible += 1
 
                     yield f"data: {json.dumps({'type': 'claim', 'claim': claim.model_dump(), 'completed': completed, 'total': total})}\n\n"
+                    finalized_claims.append(claim)
                     scrape = telemetry.get_document_scrape_snapshot(document_id)
                     yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'total': total, 'verified': verified, 'plausible': plausible, 'hallucinations': hallucinations, 'in_flight': 0, 'scrape': scrape})}\n\n"
                     telemetry.update_document_progress(document_id, completed, total, claim.status)
@@ -200,6 +231,7 @@ async def run_audit_stream(body: AuditRequest):
                             plausible += 1
 
                         yield f"data: {json.dumps({'type': 'claim', 'claim': claim.model_dump(), 'completed': completed, 'total': total})}\n\n"
+                        finalized_claims.append(claim)
                         scrape = telemetry.get_document_scrape_snapshot(document_id)
                         yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'total': total, 'verified': verified, 'plausible': plausible, 'hallucinations': hallucinations, 'in_flight': len(pending_tasks), 'scrape': scrape})}\n\n"
                         telemetry.update_document_progress(document_id, completed, total, claim.status)
@@ -217,7 +249,24 @@ async def run_audit_stream(body: AuditRequest):
                             },
                         )
 
-            yield f"data: {json.dumps({'type': 'done', 'verified': verified, 'plausible': plausible, 'hallucinations': hallucinations, 'total': total})}\n\n"
+            done_payload = {'type': 'done', 'verified': verified, 'plausible': plausible, 'hallucinations': hallucinations, 'total': total}
+
+            if user_id is not None:
+                try:
+                    history_audit = AuditResponse(
+                        document=body.document,
+                        total=total,
+                        verified=verified,
+                        plausible=plausible,
+                        hallucinations=hallucinations,
+                        claims=finalized_claims,
+                    )
+                    history_id = auth_store.save_audit_history(user_id=user_id, audit=history_audit)
+                    done_payload["history_id"] = history_id
+                except Exception:
+                    logger.exception("Failed to save streaming audit history")
+
+            yield f"data: {json.dumps(done_payload)}\n\n"
             telemetry.finish_document_progress(document_id)
             telemetry.event(
                 "audit_stream_done",

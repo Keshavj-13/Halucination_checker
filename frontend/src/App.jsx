@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from "react";
-import { runAuditStream, loadSample } from "./api";
+import { runAuditStream, loadSample, extractTextFromDocument } from "./api";
 import Summary from "./components/Summary";
 import DocumentViewer from "./components/DocumentViewer";
 import DetailPanel from "./components/DetailPanel";
 
 function App() {
+    const fileInputRef = useRef(null);
     const [document, setDocument] = useState("");
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -13,6 +14,8 @@ function App() {
     const [progress, setProgress] = useState({ completed: 0, total: 0 });
     const [resources, setResources] = useState(null);
     const [scrapeStats, setScrapeStats] = useState({ urls_discovered: 0, started: 0, done: 0, cache_hits: 0, failed: 0 });
+    const [isDragOver, setIsDragOver] = useState(false);
+    const [extractedFile, setExtractedFile] = useState(null);
     const streamAbortRef = useRef(null);
 
     useEffect(() => {
@@ -139,6 +142,46 @@ function App() {
         setSelectedClaim(null);
     };
 
+    const processFile = async (file) => {
+        if (!file) return;
+
+        setLoading(true);
+        setStatus(`Extracting readable text from ${file.name}...`);
+        setSelectedClaim(null);
+        setExtractedFile(null);
+
+        const formData = new FormData();
+        formData.append("file", file);
+        const result = await extractTextFromDocument(formData);
+
+        if (!result || !result.text) {
+            setStatus("Error: failed to extract text from file");
+            setLoading(false);
+            return;
+        }
+
+        setDocument(result.text);
+        setExtractedFile({ filename: result.filename, characters: result.characters });
+        setStatus(`Extracted ${result.characters?.toLocaleString?.() ?? result.characters} chars from ${result.filename}`);
+        setLoading(false);
+    };
+
+    const handleFileInputChange = async (event) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        await processFile(file);
+        event.target.value = "";
+    };
+
+    const handleDrop = async (event) => {
+        event.preventDefault();
+        setIsDragOver(false);
+        const file = event.dataTransfer.files?.[0];
+        if (file) {
+            await processFile(file);
+        }
+    };
+
     const handleLoadSample = async () => {
         setLoading(true);
         setStatus("Loading sample data...");
@@ -181,6 +224,35 @@ function App() {
                 <div className="lg:col-span-8 space-y-6">
                     {!data ? (
                         <div className="bg-gray-900 rounded-2xl p-6 shadow-xl border border-gray-800">
+                            <div
+                                onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+                                onDragLeave={(e) => { e.preventDefault(); setIsDragOver(false); }}
+                                onDrop={handleDrop}
+                                className={`mb-4 rounded-xl border border-dashed p-4 text-sm transition-colors ${isDragOver ? "border-blue-400 bg-blue-500/10 text-blue-200" : "border-gray-700 bg-gray-950/60 text-gray-400"}`}
+                            >
+                                <div className="flex items-center justify-between gap-3">
+                                    <span>Drop a file here (PDF, DOCX, PPTX, TXT, MD, CSV, JSON, HTML, XML, LOG)</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => fileInputRef.current?.click()}
+                                        className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold"
+                                    >
+                                        Upload File
+                                    </button>
+                                </div>
+                                {extractedFile && (
+                                    <div className="mt-2 text-xs text-cyan-300 font-mono">
+                                        Loaded: {extractedFile.filename} ({extractedFile.characters} chars)
+                                    </div>
+                                )}
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    className="hidden"
+                                    onChange={handleFileInputChange}
+                                    accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html,.htm,.xml,.log"
+                                />
+                            </div>
                             <textarea
                                 className="w-full h-64 bg-gray-950 text-gray-100 p-6 rounded-xl border border-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none text-lg font-serif leading-relaxed"
                                 placeholder="Paste your document here to begin the audit..."

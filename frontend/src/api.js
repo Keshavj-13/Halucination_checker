@@ -33,6 +33,13 @@ export async function runAudit(document) {
     return data ?? FALLBACK;
 }
 
+export async function extractTextFromDocument(formData) {
+    return await safeFetch(`${BASE}/documents/readable-text`, {
+        method: "POST",
+        body: formData,
+    });
+}
+
 export async function runAuditStream(document, onUpdate, signal) {
     try {
         const response = await fetch(`${BASE}/audit/stream`, {
