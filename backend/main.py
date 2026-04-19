@@ -4,6 +4,7 @@ from fastapi import Request
 from routes.audit import router
 from routes.documents import router as documents_router
 from routes.auth import router as auth_router
+from routes.chat import router as chat_router
 from services.embedding_service import embedding_service
 from services.retrieval_pipeline import retrieval_pipeline
 from services.verifier import shutdown_verifier_executors
@@ -64,6 +65,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(documents_router)
 app.include_router(auth_router)
+app.include_router(chat_router)
 
 
 @app.get("/")

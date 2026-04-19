@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_BASE || window.location.origin;
+const BASE = (import.meta.env.VITE_API_BASE || window.location.origin).replace(/\/$/, "");
 
 const FALLBACK = {
     document:
@@ -14,42 +14,172 @@ const FALLBACK = {
     ],
 };
 
-async function safeFetch(url, options = {}) {
+function buildUrl(path) {
+    return `${BASE}${path}`;
+}
+
+function buildHeaders({ token, json = false } = {}) {
+    const headers = {};
+    if (json) {
+        headers["Content-Type"] = "application/json";
+    }
+
+    if (token) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+
+    return headers;
+}
+
+function tryParseJson(text) {
+    if (!text) {
+        return null;
+    }
+
     try {
-        const res = await fetch(url, options);
-        if (!res.ok) throw new Error("Non-2xx response");
-        return await res.json();
+        return JSON.parse(text);
     } catch {
         return null;
     }
 }
 
-export async function runAudit(document) {
-    const data = await safeFetch(`${BASE}/audit`, {
+async function readError(response) {
+    const text = await response.text();
+    const payload = tryParseJson(text);
+    if (payload && typeof payload === "object") {
+        if (typeof payload.detail === "string") {
+            return payload.detail;
+        }
+
+        if (typeof payload.message === "string") {
+            return payload.message;
+        }
+
+        return JSON.stringify(payload);
+    }
+
+    return text || `${response.status} ${response.statusText}`;
+}
+
+async function requestJson(path, { method = "GET", body, token, signal } = {}) {
+    const isFormData = body instanceof FormData;
+    const response = await fetch(buildUrl(path), {
+        method,
+        headers: buildHeaders({ token, json: body !== undefined && !isFormData }),
+        body:
+            body === undefined
+                ? undefined
+                : isFormData
+                    ? body
+                    : JSON.stringify(body),
+        signal,
+    });
+
+    if (!response.ok) {
+        throw new Error(await readError(response));
+    }
+
+    if (response.status === 204) {
+        return null;
+    }
+
+    const text = await response.text();
+    if (!text) {
+        return null;
+    }
+
+    const payload = tryParseJson(text);
+    if (payload === null) {
+        throw new Error("Expected a JSON response from the server.");
+    }
+
+    return payload;
+}
+
+async function safeFetch(path, options = {}) {
+    try {
+        return await requestJson(path, options);
+    } catch {
+        return null;
+    }
+}
+
+export function login(credentials) {
+    return requestJson("/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document }),
+        body: credentials,
+    });
+}
+
+export function register(credentials) {
+    return requestJson("/auth/register", {
+        method: "POST",
+        body: credentials,
+    });
+}
+
+export function getCurrentUser(token) {
+    return requestJson("/auth/me", { token });
+}
+
+export function logout(token) {
+    return requestJson("/auth/logout", {
+        method: "POST",
+        token,
+    });
+}
+
+export function listHistory(token) {
+    return requestJson("/history", { token });
+}
+
+export function getHistoryDetail(historyId, token) {
+    return requestJson(`/history/${historyId}`, { token });
+}
+
+export function sendChatMessage(payload, token) {
+    return requestJson("/chat", {
+        method: "POST",
+        body: payload,
+        token,
+    });
+}
+
+export function getChatHistory(sessionId, token) {
+    return requestJson(`/chat/history/${encodeURIComponent(sessionId)}`, { token });
+}
+
+export async function runAudit(document, token) {
+    const data = await safeFetch("/audit", {
+        method: "POST",
+        body: { document },
+        token,
     });
     return data ?? FALLBACK;
 }
 
-export async function extractTextFromDocument(formData) {
-    return await safeFetch(`${BASE}/documents/readable-text`, {
+export async function extractTextFromDocument(formData, token) {
+    return await safeFetch("/documents/readable-text", {
         method: "POST",
         body: formData,
+        token,
     });
 }
 
-export async function runAuditStream(document, onUpdate, signal) {
+export async function runAuditStream(document, onUpdate, token, signal) {
     try {
-        const response = await fetch(`${BASE}/audit/stream`, {
+        const response = await fetch(buildUrl("/audit/stream"), {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: buildHeaders({ token, json: true }),
             body: JSON.stringify({ document }),
             signal,
         });
 
-        if (!response.ok) throw new Error("Stream failed");
+        if (!response.ok) throw new Error(await readError(response));
+
+        if (!response.body) {
+            throw new Error("Stream body is empty");
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -89,6 +219,6 @@ export async function runAuditStream(document, onUpdate, signal) {
 }
 
 export async function loadSample() {
-    const data = await safeFetch(`${BASE}/audit/sample`);
+    const data = await safeFetch("/audit/sample");
     return data ?? FALLBACK;
 }

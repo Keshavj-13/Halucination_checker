@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import Header, HTTPException
 
-from models.schemas import AuditResponse, HistoryDetail, HistorySummary, UserProfile
+from models.schemas import AuditResponse, ChatMessage, HistoryDetail, HistorySummary, UserProfile
 
 logger = logging.getLogger("audit-api.auth-store")
 
@@ -199,6 +199,88 @@ class AuthStore:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
 
+    def save_chat_message(
+        self,
+        *,
+        user_id: int,
+        session_id: str,
+        role: str,
+        message: str,
+    ) -> ChatMessage:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("Session ID is required.")
+
+        normalized_role = role.strip().lower()
+        if normalized_role not in {"user", "assistant"}:
+            raise ValueError("Role must be either 'user' or 'assistant'.")
+
+        normalized_message = message.strip()
+        if not normalized_message:
+            raise ValueError("Message cannot be empty.")
+
+        timestamp = _utc_now()
+
+        try:
+            with self._lock, self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO chat_history (user_id, session_id, role, message, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, normalized_session_id, normalized_role, normalized_message, timestamp),
+                )
+                message_id = cursor.lastrowid
+        except sqlite3.Error as exc:
+            logger.exception("Failed to save chat message for user %s", user_id)
+            raise RuntimeError("Failed to save chat history.") from exc
+
+        return ChatMessage(
+            id=message_id,
+            session_id=normalized_session_id,
+            role=normalized_role,
+            message=normalized_message,
+            timestamp=timestamp,
+        )
+
+    def get_chat_history(self, user_id: int, session_id: str, limit: int = 50) -> list[ChatMessage]:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise ValueError("Session ID is required.")
+
+        safe_limit = max(1, min(limit, 200))
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, session_id, role, message, timestamp
+                    FROM (
+                        SELECT id, session_id, role, message, timestamp
+                        FROM chat_history
+                        WHERE user_id = ? AND session_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    ) recent
+                    ORDER BY timestamp ASC, id ASC
+                    """,
+                    (user_id, normalized_session_id, safe_limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            logger.exception("Failed to load chat history for user %s", user_id)
+            raise RuntimeError("Failed to load chat history.") from exc
+
+        return [
+            ChatMessage(
+                id=row["id"],
+                session_id=row["session_id"],
+                role=row["role"],
+                message=row["message"],
+                timestamp=row["timestamp"],
+            )
+            for row in rows
+        ]
+
     def save_audit_history(self, *, user_id: int, audit: AuditResponse, source_name: Optional[str] = None) -> int:
         title = build_history_title(audit.document, source_name)
         preview = _compact_preview(audit.document)
@@ -285,13 +367,34 @@ class AuthStore:
 auth_store = AuthStore(DB_PATH)
 
 
+def _extract_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Invalid authorization header.")
+    return token
+
+
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> AuthenticatedUser:
-    token = (authorization or "").partition(" ")[2]
+    token = _extract_token(authorization)
     if not token:
-        raise HTTPException(status_code=401, detail="Missing bearer token.")
+        raise HTTPException(status_code=401, detail="Authentication required.")
 
     user = auth_store.get_user_by_token(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session.")
 
+    return user
+
+
+def get_optional_user(authorization: Optional[str] = Header(default=None)) -> Optional[AuthenticatedUser]:
+    token = _extract_token(authorization)
+    if not token:
+        return None
+
+    user = auth_store.get_user_by_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
     return user

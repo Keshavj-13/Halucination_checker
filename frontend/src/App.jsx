@@ -1,22 +1,113 @@
-import { useState, useEffect, useRef } from "react";
-import { runAuditStream, loadSample, extractTextFromDocument } from "./api";
+import { useEffect, useRef, useState } from "react";
+import {
+    extractTextFromDocument,
+    getCurrentUser,
+    getHistoryDetail,
+    listHistory,
+    loadSample,
+    login,
+    logout,
+    register,
+    runAuditStream,
+} from "./api";
+import AuthScreen from "./components/AuthScreen";
 import Summary from "./components/Summary";
 import DocumentViewer from "./components/DocumentViewer";
 import DetailPanel from "./components/DetailPanel";
+import HistorySidebar from "./components/HistorySidebar";
+
+const TOKEN_KEY = "samsa.auth.token";
+const EMPTY_AUDIT = {
+    claims: [],
+    total: 0,
+    verified: 0,
+    plausible: 0,
+    hallucinations: 0,
+};
 
 function App() {
     const fileInputRef = useRef(null);
+    const streamAbortRef = useRef(null);
     const [document, setDocument] = useState("");
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState("");
     const [selectedClaim, setSelectedClaim] = useState(null);
-    const [progress, setProgress] = useState({ completed: 0, total: 0 });
-    const [resources, setResources] = useState(null);
-    const [scrapeStats, setScrapeStats] = useState({ urls_discovered: 0, started: 0, done: 0, cache_hits: 0, failed: 0 });
     const [isDragOver, setIsDragOver] = useState(false);
+    const [workspaceError, setWorkspaceError] = useState("");
     const [extractedFile, setExtractedFile] = useState(null);
-    const streamAbortRef = useRef(null);
+
+    const [token, setToken] = useState(() => window.localStorage.getItem(TOKEN_KEY) ?? "");
+    const [user, setUser] = useState(null);
+    const [history, setHistory] = useState([]);
+    const [loadingHistory, setLoadingHistory] = useState(false);
+    const [activeHistoryId, setActiveHistoryId] = useState(null);
+    const [authReady, setAuthReady] = useState(false);
+    const [authMode, setAuthMode] = useState("login");
+    const [authForm, setAuthForm] = useState({ username: "", password: "" });
+    const [authLoading, setAuthLoading] = useState(false);
+    const [authError, setAuthError] = useState("");
+
+    useEffect(() => {
+        let cancelled = false;
+
+        async function restoreSession() {
+            if (!token) {
+                if (!cancelled) {
+                    setUser(null);
+                    setHistory([]);
+                    setActiveHistoryId(null);
+                    setAuthReady(true);
+                    setLoadingHistory(false);
+                }
+                return;
+            }
+
+            if (!cancelled) {
+                setAuthReady(false);
+                setLoadingHistory(true);
+            }
+
+            try {
+                const currentUser = await getCurrentUser(token);
+                if (cancelled) {
+                    return;
+                }
+
+                setUser(currentUser);
+                setAuthError("");
+
+                const items = await listHistory(token);
+                if (cancelled) {
+                    return;
+                }
+
+                setHistory(items);
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+
+                window.localStorage.removeItem(TOKEN_KEY);
+                setToken("");
+                setUser(null);
+                setHistory([]);
+                setActiveHistoryId(null);
+                setAuthError("Your saved session expired. Sign in again to continue.");
+            } finally {
+                if (!cancelled) {
+                    setLoadingHistory(false);
+                    setAuthReady(true);
+                }
+            }
+        }
+
+        restoreSession();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [token]);
 
     useEffect(() => {
         if (!selectedClaim || !data?.claims?.length) return;
@@ -28,18 +119,223 @@ function App() {
         }
     }, [data?.claims, selectedClaim]);
 
-    const mergeClaim = (existingClaims, incomingClaim) => {
-        const idx = existingClaims.findIndex(
-            (c) => c.start_idx === incomingClaim.start_idx && c.end_idx === incomingClaim.end_idx
-        );
-        if (idx === -1) return [...existingClaims, incomingClaim];
-        const next = [...existingClaims];
-        next[idx] = incomingClaim;
-        return next;
+    const persistToken = (nextToken) => {
+        if (nextToken) {
+            window.localStorage.setItem(TOKEN_KEY, nextToken);
+        } else {
+            window.localStorage.removeItem(TOKEN_KEY);
+        }
+
+        setToken(nextToken);
+    };
+
+    const resetWorkspace = () => {
+        if (streamAbortRef.current) {
+            streamAbortRef.current.abort();
+            streamAbortRef.current = null;
+        }
+        setDocument("");
+        setData(null);
+        setSelectedClaim(null);
+        setStatus("");
+        setWorkspaceError("");
+        setLoading(false);
+        setActiveHistoryId(null);
+        setExtractedFile(null);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = "";
+        }
+    };
+
+    const refreshHistory = async (sessionToken = token, preferredHistoryId = null) => {
+        if (!sessionToken) {
+            return [];
+        }
+
+        setLoadingHistory(true);
+
+        try {
+            const items = await listHistory(sessionToken);
+            setHistory(items);
+            setActiveHistoryId((current) => {
+                if (preferredHistoryId) {
+                    return preferredHistoryId;
+                }
+
+                if (current && items.some((item) => item.id === current)) {
+                    return current;
+                }
+
+                return current;
+            });
+            return items;
+        } catch (error) {
+            setWorkspaceError(error.message);
+            return [];
+        } finally {
+            setLoadingHistory(false);
+        }
+    };
+
+    const openHistoryItem = async (historyId, { quiet = false } = {}) => {
+        if (!token) {
+            return;
+        }
+
+        if (!quiet) {
+            setStatus("Loading saved audit...");
+        }
+        setWorkspaceError("");
+
+        try {
+            const detail = await getHistoryDetail(historyId, token);
+            setDocument(detail.audit.document);
+            setData(detail.audit);
+            setSelectedClaim(null);
+            setActiveHistoryId(historyId);
+        } catch (error) {
+            setWorkspaceError(error.message);
+        } finally {
+            if (!quiet) {
+                setStatus("");
+            }
+        }
+    };
+
+    const handleAuthFieldChange = (event) => {
+        const { name, value } = event.target;
+        setAuthForm((previous) => ({
+            ...previous,
+            [name]: value,
+        }));
+    };
+
+    const handleAuthModeChange = (mode) => {
+        setAuthMode(mode);
+        setAuthError("");
+    };
+
+    const handleAuthSubmit = async (event) => {
+        event.preventDefault();
+        setAuthLoading(true);
+        setAuthError("");
+        setWorkspaceError("");
+
+        try {
+            const action = authMode === "login" ? login : register;
+            const response = await action(authForm);
+            setUser(response.user);
+            persistToken(response.token);
+            setAuthForm({ username: "", password: "" });
+        } catch (error) {
+            setAuthError(error.message);
+        } finally {
+            setAuthLoading(false);
+        }
+    };
+
+    const handleLogout = async () => {
+        try {
+            if (token) {
+                await logout(token);
+            }
+        } catch {
+            // ignore
+        }
+
+        persistToken("");
+        setUser(null);
+        setHistory([]);
+        setAuthError("");
+        resetWorkspace();
+    };
+
+    const handleStreamUpdate = (update) => {
+        if (update.type === "start") {
+            setData({
+                ...EMPTY_AUDIT,
+                total: update.total,
+            });
+            setStatus(`Verifying ${update.total} claims...`);
+            return;
+        }
+
+        if (update.type === "claims_extracted") {
+            setData((previous) => ({
+                ...(previous ?? EMPTY_AUDIT),
+                claims: update.claims || [],
+                total: update.total ?? previous?.total ?? 0,
+            }));
+            return;
+        }
+
+        if (update.type === "claim") {
+            setData((previous) => {
+                const baseline = previous ?? EMPTY_AUDIT;
+                const claims = [...(baseline.claims || [])];
+                const idx = claims.findIndex((item) => item.start_idx === update.claim.start_idx && item.end_idx === update.claim.end_idx);
+                if (idx >= 0) {
+                    claims[idx] = update.claim;
+                } else {
+                    claims.push(update.claim);
+                }
+
+                return {
+                    ...baseline,
+                    claims,
+                    verified: claims.filter((claim) => claim.status === "Verified").length,
+                    plausible: claims.filter((claim) => claim.status === "Plausible").length,
+                    hallucinations: claims.filter((claim) => claim.status === "Hallucination").length,
+                };
+            });
+            return;
+        }
+
+        if (update.type === "progress") {
+            setStatus(`Verified ${update.completed || 0}/${update.total || 0} claims...`);
+            return;
+        }
+
+        if (update.type === "heartbeat") {
+            const inflight = update.in_flight ?? 0;
+            setStatus(`Running... ${update.completed || 0}/${update.total || 0} completed, ${inflight} in-flight`);
+            return;
+        }
+
+        if (update.type === "status" || update.type === "stage") {
+            setStatus(update.message || "Processing...");
+            return;
+        }
+
+        if (update.type === "done") {
+            setLoading(false);
+            setStatus("");
+            return;
+        }
+
+        if (update.type === "stream_end") {
+            setLoading(false);
+            setStatus("Completed");
+            return;
+        }
+
+        if (update.type === "cancelled") {
+            setLoading(false);
+            setStatus("Cancelled");
+            return;
+        }
+
+        if (update.type === "error") {
+            setLoading(false);
+            setStatus("");
+            setWorkspaceError(update.message);
+        }
     };
 
     const handleAudit = async () => {
-        if (!document.trim()) return;
+        if (!document.trim() || !token) {
+            return;
+        }
 
         if (streamAbortRef.current) {
             streamAbortRef.current.abort();
@@ -48,122 +344,53 @@ function App() {
         streamAbortRef.current = controller;
 
         setLoading(true);
-        setData({ claims: [], total: 0, verified: 0, plausible: 0, hallucinations: 0 });
+        setWorkspaceError("");
+        setData({ ...EMPTY_AUDIT });
         setStatus("Analyzing document structure...");
-        setProgress({ completed: 0, total: 0 });
-        setResources(null);
-        setScrapeStats({ urls_discovered: 0, started: 0, done: 0, cache_hits: 0, failed: 0 });
         setSelectedClaim(null);
+        setActiveHistoryId(null);
 
-        await runAuditStream(document, (update) => {
-            if (update.type === "start") {
-                setData(prev => ({ ...prev, total: update.total }));
-                setStatus(`Verifying ${update.total} claims...`);
-                setProgress({ completed: 0, total: update.total });
-            } else if (update.type === "resources") {
-                setResources(update.resources || null);
-            } else if (update.type === "stage") {
-                setStatus(update.message || "Processing...");
-            } else if (update.type === "claims_extracted") {
-                setData(prev => ({ ...prev, claims: update.claims || [] }));
-            } else if (update.type === "claim") {
-                setData(prev => {
-                    const newClaims = mergeClaim(prev.claims || [], update.claim);
-                    const verified = newClaims.filter(c => c.status === "Verified").length;
-                    const plausible = newClaims.filter(c => c.status === "Plausible").length;
-                    const hallucinations = newClaims.filter(c => c.status === "Hallucination").length;
-                    return {
-                        ...prev,
-                        claims: newClaims,
-                        verified,
-                        plausible,
-                        hallucinations
-                    };
-                });
-                setSelectedClaim((prev) => {
-                    if (!prev) return update.claim;
-                    if (prev.start_idx === update.claim.start_idx && prev.end_idx === update.claim.end_idx) {
-                        return update.claim;
-                    }
-                    return prev;
-                });
-                setProgress({ completed: update.completed || 0, total: update.total || 0 });
-            } else if (update.type === "progress") {
-                setData(prev => ({
-                    ...prev,
-                    verified: update.verified ?? prev.verified,
-                    plausible: update.plausible ?? prev.plausible,
-                    hallucinations: update.hallucinations ?? prev.hallucinations,
-                }));
-                if (update.scrape) {
-                    setScrapeStats(update.scrape);
-                }
-                setProgress({ completed: update.completed || 0, total: update.total || 0 });
-                setStatus(`Verified ${update.completed || 0}/${update.total || 0} claims...`);
-            } else if (update.type === "heartbeat") {
-                setProgress({ completed: update.completed || 0, total: update.total || 0 });
-                const inflight = update.in_flight ?? 0;
-                const s = update.scrape || scrapeStats;
-                if (update.scrape) {
-                    setScrapeStats(update.scrape);
-                }
-                setStatus(
-                    `Running... ${update.completed || 0}/${update.total || 0} completed, ${inflight} in-flight · scraping ${s.done || 0}/${s.urls_discovered || 0} (cache ${s.cache_hits || 0}, fail ${s.failed || 0})`
-                );
-            } else if (update.type === "done") {
-                setLoading(false);
-                setProgress({ completed: update.total || progress.total, total: update.total || progress.total });
-                setStatus("Completed");
-            } else if (update.type === "stream_end") {
-                setLoading(false);
-                setStatus("Completed");
-            } else if (update.type === "cancelled") {
-                setLoading(false);
-                setStatus("Cancelled");
-            } else if (update.type === "error") {
-                setLoading(false);
-                setStatus("Error: " + update.message);
-            }
-        }, controller.signal);
+        const donePayload = await runAuditStream(document, handleStreamUpdate, token, controller.signal);
+
+        if (donePayload?.history_id) {
+            await refreshHistory(token, donePayload.history_id);
+            await openHistoryItem(donePayload.history_id, { quiet: true });
+        } else {
+            await refreshHistory(token);
+        }
 
         if (streamAbortRef.current === controller) {
             streamAbortRef.current = null;
         }
     };
 
-    const handleBackToEditor = () => {
-        if (streamAbortRef.current) {
-            streamAbortRef.current.abort();
-            streamAbortRef.current = null;
-        }
-        setLoading(false);
-        setStatus("");
-        setData(null);
-        setSelectedClaim(null);
-    };
-
     const processFile = async (file) => {
-        if (!file) return;
+        if (!file || !token) return;
 
         setLoading(true);
+        setWorkspaceError("");
+        setData(null);
         setStatus(`Extracting readable text from ${file.name}...`);
         setSelectedClaim(null);
-        setExtractedFile(null);
+        setActiveHistoryId(null);
 
         const formData = new FormData();
         formData.append("file", file);
-        const result = await extractTextFromDocument(formData);
 
-        if (!result || !result.text) {
-            setStatus("Error: failed to extract text from file");
+        try {
+            const result = await extractTextFromDocument(formData, token);
+            setDocument(result.text);
+            setExtractedFile({
+                filename: result.filename,
+                characters: result.characters,
+            });
+            setStatus(`Extracted ${result.characters.toLocaleString()} readable characters from ${result.filename}.`);
+        } catch (error) {
+            setWorkspaceError(error.message);
+            setStatus("");
+        } finally {
             setLoading(false);
-            return;
         }
-
-        setDocument(result.text);
-        setExtractedFile({ filename: result.filename, characters: result.characters });
-        setStatus(`Extracted ${result.characters?.toLocaleString?.() ?? result.characters} chars from ${result.filename}`);
-        setLoading(false);
     };
 
     const handleFileInputChange = async (event) => {
@@ -184,135 +411,179 @@ function App() {
 
     const handleLoadSample = async () => {
         setLoading(true);
+        setWorkspaceError("");
         setStatus("Loading sample data...");
-        const result = await loadSample();
-        setData(result);
-        setDocument(result.document);
-        setLoading(false);
-        setStatus("");
-        setProgress({ completed: result.total || 0, total: result.total || 0 });
-        setSelectedClaim(null);
+
+        try {
+            const result = await loadSample();
+            setData(result);
+            setDocument(result.document);
+            setSelectedClaim(null);
+            setActiveHistoryId(null);
+        } catch (error) {
+            setWorkspaceError(error.message);
+        } finally {
+            setLoading(false);
+            setStatus("");
+        }
     };
 
-    return (
-        <div className="min-h-screen bg-gray-950 text-gray-100 p-4 sm:p-8">
-            <header className="max-w-7xl mx-auto mb-8 flex items-center justify-between">
-                <div>
-                    <h1 className="text-3xl font-black tracking-tighter text-white">
-                        SAMSA <span className="text-blue-500">AUDITOR</span>
-                    </h1>
-                    <p className="text-gray-500 text-sm font-medium">Multilayer Ensemble Hallucination Detection</p>
-                </div>
-                <div className="flex gap-4">
-                    <button
-                        onClick={handleLoadSample}
-                        disabled={loading}
-                        className="text-gray-400 hover:text-white text-sm font-bold transition-colors"
-                    >
-                        Load Sample
-                    </button>
-                    <div className="h-8 w-px bg-gray-800" />
-                    <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                        <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">System Ready</span>
-                    </div>
-                </div>
-            </header>
+    if (!authReady) {
+        return (
+            <div className="flex min-h-screen items-center justify-center bg-[#0a0c10] px-4 text-sm font-semibold uppercase tracking-[0.3em] text-gray-400">
+                Loading workspace...
+            </div>
+        );
+    }
 
-            <main className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
-                {/* Input & Viewer Column */}
-                <div className="lg:col-span-8 space-y-6">
-                    {!data ? (
-                        <div className="bg-gray-900 rounded-2xl p-6 shadow-xl border border-gray-800">
+    if (!user) {
+        return (
+            <AuthScreen
+                mode={authMode}
+                form={authForm}
+                loading={authLoading}
+                error={authError}
+                onFieldChange={handleAuthFieldChange}
+                onModeChange={handleAuthModeChange}
+                onSubmit={handleAuthSubmit}
+            />
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-[#0a0c10] text-gray-100 lg:grid lg:grid-cols-[320px_minmax(0,1fr)]">
+            <HistorySidebar
+                user={user}
+                history={history}
+                activeHistoryId={activeHistoryId}
+                loadingHistory={loadingHistory}
+                onNewAudit={resetWorkspace}
+                onSelectHistory={openHistoryItem}
+                onLogout={handleLogout}
+            />
+
+            <div className="min-h-screen px-4 py-6 sm:px-6 lg:px-8">
+                <header className="mx-auto mb-8 flex max-w-7xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                    <div className="space-y-2">
+                        <div className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-200/70">
+                            Authenticated Workspace
+                        </div>
+                        <div>
+                            <h1 className="text-3xl font-black tracking-tight text-white sm:text-4xl">
+                                SAMSA Auditor
+                            </h1>
+                            <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400 sm:text-base">
+                                Run new audits, reopen previous results, and keep everything tied to your local account.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-4">
+                        <button
+                            type="button"
+                            onClick={handleLoadSample}
+                            disabled={loading}
+                            className="rounded-2xl border border-white/10 px-4 py-3 text-sm font-semibold text-gray-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            Load Sample
+                        </button>
+                    </div>
+                </header>
+
+                {workspaceError ? (
+                    <div className="mx-auto mb-6 max-w-7xl rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                        {workspaceError}
+                    </div>
+                ) : null}
+
+                {status ? (
+                    <div className="mx-auto mb-6 max-w-7xl rounded-2xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
+                        {status}
+                    </div>
+                ) : null}
+
+                <main className="mx-auto grid max-w-7xl grid-cols-1 gap-8 lg:grid-cols-12">
+                    <div className="space-y-6 lg:col-span-8">
+                        {!data || data.claims.length === 0 ? (
                             <div
-                                onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-                                onDragLeave={(e) => { e.preventDefault(); setIsDragOver(false); }}
+                                className={`rounded-[2rem] border bg-[#101318] p-6 shadow-[0_24px_60px_rgba(0,0,0,0.35)] transition-all ${
+                                    isDragOver ? "border-blue-400/60 bg-[#121923]" : "border-white/10"
+                                }`}
+                                onDragOver={(event) => {
+                                    event.preventDefault();
+                                    setIsDragOver(true);
+                                }}
+                                onDragLeave={(event) => {
+                                    event.preventDefault();
+                                    setIsDragOver(false);
+                                }}
                                 onDrop={handleDrop}
-                                className={`mb-4 rounded-xl border border-dashed p-4 text-sm transition-colors ${isDragOver ? "border-blue-400 bg-blue-500/10 text-blue-200" : "border-gray-700 bg-gray-950/60 text-gray-400"}`}
                             >
-                                <div className="flex items-center justify-between gap-3">
-                                    <span>Drop a file here (PDF, DOCX, PPTX, TXT, MD, CSV, JSON, HTML, XML, LOG)</span>
+                                <textarea
+                                    className="h-72 w-full resize-none rounded-[1.5rem] border border-white/10 bg-[#0b0f14] px-5 py-5 text-base leading-7 text-gray-100 outline-none transition focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/20 sm:text-lg"
+                                    placeholder="Paste your document here or upload a PDF, DOCX, PPTX, or text file..."
+                                    value={document}
+                                    onChange={(event) => {
+                                        setDocument(event.target.value);
+                                        setExtractedFile(null);
+                                    }}
+                                />
+                                {extractedFile ? (
+                                    <div className="mt-4 rounded-2xl border border-green-500/20 bg-green-500/10 px-4 py-3 text-sm text-green-100">
+                                        Loaded {extractedFile.filename} with {extractedFile.characters.toLocaleString()} readable characters.
+                                    </div>
+                                ) : null}
+                                <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html,.htm,.xml,.log"
+                                        className="hidden"
+                                        onChange={handleFileInputChange}
+                                    />
                                     <button
                                         type="button"
                                         onClick={() => fileInputRef.current?.click()}
-                                        className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold"
+                                        disabled={loading}
+                                        className="flex w-full items-center justify-center gap-3 rounded-[1.5rem] border border-white/10 px-4 py-4 text-sm font-bold uppercase tracking-[0.22em] text-gray-200 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
                                     >
-                                        Upload File
+                                        Upload document
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleAudit}
+                                        disabled={loading || !document.trim()}
+                                        className="flex w-full items-center justify-center gap-3 rounded-[1.5rem] bg-blue-600 px-4 py-4 text-sm font-bold uppercase tracking-[0.22em] text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-700"
+                                    >
+                                        {loading ? "Working..." : "Start audit"}
                                     </button>
                                 </div>
-                                {extractedFile && (
-                                    <div className="mt-2 text-xs text-cyan-300 font-mono">
-                                        Loaded: {extractedFile.filename} ({extractedFile.characters} chars)
-                                    </div>
-                                )}
-                                <input
-                                    ref={fileInputRef}
-                                    type="file"
-                                    className="hidden"
-                                    onChange={handleFileInputChange}
-                                    accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html,.htm,.xml,.log"
+                            </div>
+                        ) : (
+                            <>
+                                <Summary data={data} />
+                                <DocumentViewer
+                                    text={document}
+                                    claims={data.claims}
+                                    onSelectClaim={setSelectedClaim}
+                                    selectedClaim={selectedClaim}
                                 />
-                            </div>
-                            <textarea
-                                className="w-full h-64 bg-gray-950 text-gray-100 p-6 rounded-xl border border-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none text-lg font-serif leading-relaxed"
-                                placeholder="Paste your document here to begin the audit..."
-                                value={document}
-                                onChange={(e) => setDocument(e.target.value)}
-                            />
-                            <button
-                                onClick={handleAudit}
-                                disabled={loading || !document.trim()}
-                                className="w-full mt-4 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 text-white font-black py-4 rounded-xl transition-all shadow-lg active:scale-[0.98] flex items-center justify-center gap-3 text-lg"
-                            >
-                                {loading ? (
-                                    <>
-                                        <svg className="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        {status || "Running Audit..."}
-                                    </>
-                                ) : "START AUDIT"}
-                            </button>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="bg-gray-900 rounded-2xl p-4 border border-gray-800 text-sm text-gray-300 flex items-center justify-between">
-                                <span>{status || "Ready"}</span>
-                                <div className="flex items-center gap-4">
-                                    {resources && (
-                                        <span className="font-mono text-[11px] text-cyan-300">
-                                            C:{resources.max_claims_in_flight} V:{resources.voter_cpu_workers} S:{resources.scrape_concurrency} G:{resources.ollama_num_gpu}
-                                        </span>
-                                    )}
-                                    <span className="font-mono text-[11px] text-amber-300">
-                                        scrape {scrapeStats.done}/{scrapeStats.urls_discovered} c{scrapeStats.cache_hits} f{scrapeStats.failed}
-                                    </span>
-                                    <span className="font-mono text-gray-400">{progress.completed}/{progress.total || data.total || 0}</span>
-                                </div>
-                            </div>
-                            <Summary data={data} />
-                            <DocumentViewer
-                                text={document}
-                                claims={data.claims}
-                                onSelectClaim={setSelectedClaim}
-                                selectedClaim={selectedClaim}
-                            />
-                            <button
-                                onClick={handleBackToEditor}
-                                className="text-gray-500 hover:text-gray-300 text-sm font-bold flex items-center gap-2 transition-colors"
-                            >
-                                ← Back to Editor
-                            </button>
-                        </>
-                    )}
-                </div>
+                                <button
+                                    type="button"
+                                    onClick={resetWorkspace}
+                                    className="text-sm font-semibold text-gray-400 transition hover:text-white"
+                                >
+                                    Back to editor
+                                </button>
+                            </>
+                        )}
+                    </div>
 
-                {/* Side Dashboard Column */}
-                <div className="lg:col-span-4 sticky top-8 h-[calc(100vh-8rem)]">
-                    <DetailPanel claim={selectedClaim} loading={loading} status={status} progress={progress} resources={resources} scrapeStats={scrapeStats} />
-                </div>
-            </main>
+                    <div className="lg:col-span-4 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
+                        <DetailPanel claim={selectedClaim} />
+                    </div>
+                </main>
+            </div>
         </div>
     );
 }

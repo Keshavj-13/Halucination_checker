@@ -125,6 +125,30 @@ class AuditResponse(BaseModel):
     claims: List[Claim]
 
 
+class ChatMessage(BaseModel):
+    id: int
+    session_id: str
+    role: str = Field(pattern="^(user|assistant)$")
+    message: str
+    timestamp: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8_000)
+    session_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    messages: List[ChatMessage]
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    messages: List[ChatMessage]
+
+
 class HistorySummary(BaseModel):
     id: int
     title: str
