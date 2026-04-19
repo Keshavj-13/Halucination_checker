@@ -1,18 +1,21 @@
 fastapi
 uvicorn[standard]
 pydantic
-httpx[http2]
+python-multipart
+httpx
 python-dotenv
 duckduckgo-search
 ddgs
 PyPDF2
 python-docx
 python-pptx
-
-# Web scraping improvements
 beautifulsoup4
 lxml
-
-# Optional: Playwright for JS-heavy page rendering
-# After install run: playwright install chromium
-# playwright
+numpy
+scikit-learn
+joblib
+datasets
+pytest
+pytest-asyncio
+pytest-xdist
+tqdm

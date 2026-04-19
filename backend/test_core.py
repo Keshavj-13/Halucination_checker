@@ -20,16 +20,22 @@ async def main():
     
     for claim in claims:
         print(f"\nVerifying: {claim}")
-        result = await verify_claim(claim["text"])
+        result = await verify_claim(
+            claim["text"],
+            document_id="test-doc",
+            start_idx=claim["start"],
+            end_idx=claim["end"],
+        )
         print(f"Status: {result.status} (Confidence: {result.confidence})")
         print(f"Evidence: {len(result.evidence)} sources found.")
         
     print("\n--- Data Collection Check ---")
-    data_file = os.path.join(os.path.dirname(__file__), "data", "training_data.jsonl")
+    data_file = os.path.join(os.path.dirname(__file__), "..", "data", "logs", "audit_claim_logs.jsonl")
+    data_file = os.path.abspath(data_file)
     if os.path.exists(data_file):
-        print("✅ training_data.jsonl created successfully.")
+        print("✅ audit_claim_logs.jsonl created successfully.")
     else:
-        print("❌ training_data.jsonl not found.")
+        print("❌ audit_claim_logs.jsonl not found.")
 
 if __name__ == "__main__":
     asyncio.run(main())

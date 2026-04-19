@@ -1,30 +1,59 @@
 from typing import List, Dict, Any
+import re
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
 from services.voters.base import Voter
 from models.schemas import Evidence
 
+
 class HeuristicVoter(Voter):
-    """Simple keyword overlap voter."""
-    
+    """TF-IDF weighted lexical overlap voter."""
+
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english")
+
     async def vote(self, claim: str, evidence: List[Evidence]) -> Dict[str, Any]:
-        claim_words = set(claim.lower().split())
-        all_ev_words = set(" ".join([ev.snippet for ev in evidence]).lower().split())
-        
-        if not claim_words: return {"status": "Plausible", "confidence": 0.5, "reasoning": "Empty claim."}
-        
-        intersection = claim_words.intersection(all_ev_words)
-        overlap = len(intersection) / len(claim_words)
-        
-        if overlap > 0.7:
+        if not claim.strip():
+            return {"status": "Plausible", "confidence": 0.5, "reasoning": "Empty claim.", "score": 0.5}
+
+        if not evidence:
+            return {"status": "Hallucination", "confidence": 0.1, "reasoning": "No evidence available.", "score": 0.1}
+
+        best_score = 0.0
+        best_idx = 0
+
+        for idx, ev in enumerate(evidence):
+            snippet = ev.snippet.strip()
+            if not snippet:
+                continue
+
+            try:
+                tfidf = self.vectorizer.fit_transform([claim, snippet])
+                sim = float((tfidf[0] @ tfidf[1].T).toarray()[0][0])
+            except ValueError:
+                sim = 0.0
+
+            # Reliability-weighted lexical score
+            weighted = sim * (0.7 + 0.3 * ev.reliability_score)
+            if weighted > best_score:
+                best_score = weighted
+                best_idx = idx
+
+        if best_score >= 0.62:
             status = "Verified"
-        elif overlap > 0.3:
+        elif best_score >= 0.34:
             status = "Plausible"
         else:
             status = "Hallucination"
-            
+
+        top_url = evidence[best_idx].url if evidence else ""
         return {
             "status": status,
-            "confidence": round(overlap, 2),
-            "reasoning": f"Keyword overlap: {int(overlap*100)}%"
+            "confidence": round(float(best_score), 4),
+            "reasoning": f"Best TF-IDF overlap={best_score:.2f} from {top_url}",
+            "score": round(float(best_score), 4),
+            "metadata": {"top_evidence_idx": best_idx},
         }
+
 
 heuristic_voter = HeuristicVoter()
