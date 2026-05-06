@@ -67,9 +67,9 @@ async def run_audit(body: AuditRequest, request: Request):
     telemetry.event("claims_verified", document_id=document_id, stage="verify", message=f"verified {len(verified_claims)} claims", payload={"num_claims": len(verified_claims)})
     
     # 3. Calculate Stats
-    verified = len([c for c in verified_claims if c.status == "Verified"])
-    plausible = len([c for c in verified_claims if c.status == "Plausible"])
-    hallucinations = len([c for c in verified_claims if c.status == "Hallucination"])
+    verified = len([c for c in verified_claims if c.status in {"VERIFIED", "Verified"}])
+    plausible = len([c for c in verified_claims if c.status in {"PLAUSIBLE", "Plausible", "UNCERTAIN", "CONFLICTING"}])
+    hallucinations = len([c for c in verified_claims if c.status in {"REFUTED", "Hallucination"}])
     telemetry.event(
         "audit_request_done",
         document_id=document_id,
@@ -157,15 +157,17 @@ async def run_audit_stream(body: AuditRequest, request: Request):
                     document_id=c.get("document_id", document_id),
                     start_idx=c["start"],
                     end_idx=c["end"],
+                    structured_claim=c.get("structured_claim"),
+                    claim_type=c.get("claim_type"),
                 )
 
             if PIPELINE_SERIAL_MODE:
                 for c in claims_data:
                     claim = await _run_claim(c)
                     completed += 1
-                    if claim.status == "Verified":
+                    if claim.status in {"VERIFIED", "Verified"}:
                         verified += 1
-                    elif claim.status == "Hallucination":
+                    elif claim.status in {"REFUTED", "Hallucination"}:
                         hallucinations += 1
                     else:
                         plausible += 1
@@ -223,9 +225,9 @@ async def run_audit_stream(body: AuditRequest, request: Request):
                     for task in done:
                         claim = await task
                         completed += 1
-                        if claim.status == "Verified":
+                        if claim.status in {"VERIFIED", "Verified"}:
                             verified += 1
-                        elif claim.status == "Hallucination":
+                        elif claim.status in {"REFUTED", "Hallucination"}:
                             hallucinations += 1
                         else:
                             plausible += 1
@@ -312,7 +314,13 @@ async def run_probe(body: AuditRequest, max_claims: int = 4):
         retrieval_started = time.perf_counter()
         try:
             retrieval = await asyncio.wait_for(
-                retrieval_pipeline.retrieve(c["text"], document_id=document_id, claim_key=claim_key),
+                retrieval_pipeline.retrieve(
+                    c["text"],
+                    document_id=document_id,
+                    claim_key=claim_key,
+                    structured_claim=c.get("structured_claim"),
+                    claim_type=c.get("claim_type"),
+                ),
                 timeout=12.0,
             )
             row["retrieval"] = {
@@ -349,6 +357,8 @@ async def run_probe(body: AuditRequest, max_claims: int = 4):
                     retrieval_num_clusters=retrieval.num_clusters,
                     retrieval_independent_clusters=retrieval.independent_clusters,
                     retrieval_cluster_support=retrieval.cluster_support,
+                    structured_claim=c.get("structured_claim"),
+                    claim_type=c.get("claim_type"),
                 ),
                 timeout=10.0,
             )

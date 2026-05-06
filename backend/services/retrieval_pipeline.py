@@ -10,9 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 import httpx
-from bs4 import BeautifulSoup
 
 from models.schemas import Evidence
 from services.config import (
@@ -27,15 +27,9 @@ from services.config import (
     SEARCH_CACHE_PATH,
 )
 from services.evidence_clusterer import clusterer
-from services.embedding_service import embedding_service
 from services.runtime_cache import JsonKVCache, stable_hash
 from services.source_reliability import source_reliability_scorer
 from services.telemetry import telemetry
-
-try:
-    from ddgs import DDGS
-except ImportError:  # pragma: no cover
-    from duckduckgo_search import DDGS
 
 logger = logging.getLogger("audit-api.retrieval")
 
@@ -56,23 +50,16 @@ SUPPORT_PATTERNS = re.compile(
     r"statistically significant|replicated|reproducible|corroborated)\b"
 )
 
-QUERY_SUFFIXES = [
-    "fact check true or false",
-    "why false debunked",
-    "official source data",
-    "evidence study report",
-    "peer reviewed evidence",
-    "government data",
-    "site:gov",
-    "site:edu",
-    "source documents",
-    "meta analysis",
-    "systematic review",
-    "counter evidence",
-    "rebuttal",
-    "methodology",
-    "dataset",
-]
+CLAIM_TYPE_TO_SOURCES: Dict[str, List[str]] = {
+    "ENTITY_RELATION": ["wikidata", "wikipedia", "local"],
+    "DATE_CLAIM": ["wikidata", "wikipedia", "local"],
+    "NUMERIC_CLAIM": ["wikidata", "wikipedia", "local"],
+    "SCIENTIFIC": ["pubmed", "arxiv", "openalex", "local"],
+    "DEFINITION": ["wikipedia", "wikidata", "local"],
+    "TEMPORAL": ["wikidata", "wikipedia", "local"],
+    "SUBJECTIVE": ["local"],
+    "UNVERIFIABLE": ["local"],
+}
 
 
 def _tokenize(text: str) -> List[str]:
@@ -223,15 +210,23 @@ class RetrievalPipeline:
     async def aclose(self) -> None:
         await self._http_client.aclose()
 
-    async def retrieve(self, claim: str, document_id: str = "unknown-document", claim_key: str = "") -> RetrievalOutput:
+    async def retrieve(
+        self,
+        claim: str,
+        document_id: str = "unknown-document",
+        claim_key: str = "",
+        structured_claim: Dict[str, Any] | None = None,
+        claim_type: str | None = None,
+    ) -> RetrievalOutput:
         started = time.perf_counter()
         cache_hits = 0
         failures: List[str] = []
 
         telemetry.event("retrieval_start", document_id=document_id, claim_key=claim_key, stage="retrieval", message="retrieval started")
 
+        typed_claim = (claim_type or (structured_claim or {}).get("claim_type") or "UNVERIFIABLE").upper()
         t0 = time.perf_counter()
-        urls = await self._search_urls(claim)
+        urls = self._build_typed_urls(claim, typed_claim)
         telemetry.event(
             "retrieval_search_done",
             document_id=document_id,
@@ -240,7 +235,10 @@ class RetrievalPipeline:
             message=f"found {len(urls)} urls",
             payload={"runtime_ms": round((time.perf_counter() - t0) * 1000.0, 2), "num_urls": len(urls)},
         )
-        tasks = [asyncio.create_task(self._fetch_and_extract(u, document_id=document_id, claim_key=claim_key)) for u in urls]
+        tasks = [
+            asyncio.create_task(self._fetch_and_extract(u, claim, typed_claim, document_id=document_id, claim_key=claim_key))
+            for u in urls
+        ]
 
         valid_pages: List[Tuple[str, str, str, Dict[str, str]]] = []
         deadline = time.perf_counter() + RETRIEVAL_DEADLINE_SECONDS
@@ -340,18 +338,13 @@ class RetrievalPipeline:
             payload={"runtime_ms": round((time.perf_counter() - t2) * 1000.0, 2), "num_chunks": len(evidence)},
         )
 
-        t3 = time.perf_counter()
-        embs = await embedding_service.embed_many([ev.snippet for ev in evidence])
-        for ev, emb in zip(evidence, embs):
-            if emb:
-                ev.embedding = emb
         telemetry.event(
             "retrieval_embedding_done",
             document_id=document_id,
             claim_key=claim_key,
             stage="retrieval.embed",
-            message="embeddings ready",
-            payload={"runtime_ms": round((time.perf_counter() - t3) * 1000.0, 2), "num_embeddings": sum(1 for e in embs if e)},
+            message="embedding stage disabled for deterministic typed retrieval",
+            payload={"runtime_ms": 0.0, "num_embeddings": 0},
         )
 
         t4 = time.perf_counter()
@@ -392,24 +385,32 @@ class RetrievalPipeline:
             cluster_support=summary.support_score,
         )
 
-    async def _search_urls(self, claim: str) -> List[str]:
-        key = stable_hash(f"ddg::{claim}")
+    def _build_typed_urls(self, claim: str, claim_type: str) -> List[str]:
+        key = stable_hash(f"typed::{claim_type}::{claim}")
         cached = self.search_cache.get(key)
         if cached:
             return cached[:MAX_SEARCH_RESULTS]
 
-        queries = [("claim", claim)]
-        for suffix in QUERY_SUFFIXES:
-            queries.append(("expanded", f"{claim} {suffix}"))
+        q = "+".join(_tokenize(claim.lower())[:12])
+        sources = CLAIM_TYPE_TO_SOURCES.get(claim_type, ["local"])
+        urls: List[str] = []
+        for src in sources:
+            if src == "wikidata":
+                urls.append(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=en&search={q}")
+            elif src == "wikipedia":
+                urls.append(f"https://en.wikipedia.org/api/rest_v1/page/summary/{q}")
+            elif src == "pubmed":
+                urls.append(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmax=3&retmode=json&term={q}")
+            elif src == "arxiv":
+                urls.append(f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results=3")
+            elif src == "openalex":
+                urls.append(f"https://api.openalex.org/works?search={q}&per-page=3")
+            elif src == "local":
+                urls.append(f"local://corpus?query={q}")
 
-        all_urls: List[str] = []
-        for qtype, q in queries:
-            urls = await self._search_urls_single(q, qtype=qtype)
-            all_urls.extend(urls)
-
-        deduped: List[str] = []
+        deduped = []
         seen = set()
-        for u in all_urls:
+        for u in urls:
             if u in seen:
                 continue
             seen.add(u)
@@ -420,51 +421,18 @@ class RetrievalPipeline:
         self.search_cache.set(key, deduped)
         return deduped
 
-    async def _search_urls_single(self, query: str, qtype: str = "claim") -> List[str]:
-        loop = asyncio.get_running_loop()
+    async def _fetch_and_extract(
+        self,
+        url: str,
+        claim_text: str,
+        claim_type: str,
+        document_id: str = "unknown-document",
+        claim_key: str = "",
+    ) -> Tuple[str, str, str, Dict[str, str], bool]:
+        if url.startswith("local://"):
+            title, text = self._local_corpus_extract(claim_text)
+            return url, title, text, {"content-type": "text/plain", "x-source-type": "local"}, True
 
-        loop = asyncio.get_running_loop()
-
-        def _sync() -> List[str]:
-            with DDGS() as ddgs:
-                rows = list(ddgs.text(query, max_results=MAX_SEARCH_RESULTS))
-            return [r.get("href") for r in rows if r.get("href")]
-
-        try:
-            urls = await asyncio.wait_for(
-                loop.run_in_executor(None, _sync),
-                timeout=max(HTTP_TIMEOUT_SECONDS, 3.0),
-            )
-        except Exception as exc:
-            logger.warning(f"Search failed/timeout for query: {query[:60]}... ({exc})")
-            urls = []
-
-        if not urls:
-            simplified = " ".join(re.findall(r"[a-zA-Z0-9]+", query.lower())[:12]).strip()
-            if simplified and simplified != query.lower().strip():
-                try:
-                    telemetry.event(
-                        "retrieval_search_retry",
-                        stage="retrieval.search",
-                        message=f"retry with simplified query ({qtype})",
-                        payload={"query": simplified, "query_type": qtype},
-                    )
-
-                    def _sync_retry() -> List[str]:
-                        with DDGS() as ddgs:
-                            rows = list(ddgs.text(simplified, max_results=MAX_SEARCH_RESULTS))
-                        return [r.get("href") for r in rows if r.get("href")]
-
-                    urls = await asyncio.wait_for(
-                        loop.run_in_executor(None, _sync_retry),
-                        timeout=max(HTTP_TIMEOUT_SECONDS, 3.0),
-                    )
-                except Exception:
-                    urls = []
-
-        return urls
-
-    async def _fetch_and_extract(self, url: str, document_id: str = "unknown-document", claim_key: str = "") -> Tuple[str, str, str, Dict[str, str], bool]:
         page_key = hashlib.sha256(url.encode("utf-8")).hexdigest()
         cache_file = PAGE_CACHE_DIR / f"{page_key}.json"
         if cache_file.exists():
@@ -488,13 +456,9 @@ class RetrievalPipeline:
             payload={"url": url},
         )
         async with self._sem:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            }
             try:
-                resp = await self._http_client.get(url, headers=headers)
+                resp = await self._http_client.get(url)
                 resp.raise_for_status()
-                html = resp.text
             except Exception as exc:
                 telemetry.event(
                     "retrieval_page_fetch_error",
@@ -506,7 +470,7 @@ class RetrievalPipeline:
                 )
                 raise
 
-        title, text = self._extract_main_text(html)
+            title, text = self._parse_typed_source(url, resp.text, claim_type)
         data = {
             "title": title,
             "text": text,
@@ -523,16 +487,76 @@ class RetrievalPipeline:
         )
         return url, title, text, data["headers"], False
 
-    def _extract_main_text(self, html: str) -> Tuple[str, str]:
-        soup = BeautifulSoup(html, "lxml")
-        for tag in soup(["script", "style", "noscript", "footer", "nav", "aside"]):
-            tag.decompose()
-        title = soup.title.get_text(strip=True) if soup.title else "Web Source"
-        article = soup.find("article")
-        body = article if article else soup.body
-        text = body.get_text(" ", strip=True) if body else soup.get_text(" ", strip=True)
-        text = re.sub(r"\s+", " ", text).strip()
-        return title, text[:25000]
+    def _parse_typed_source(self, url: str, payload: str, claim_type: str) -> Tuple[str, str]:
+        try:
+            if "wikidata.org/w/api.php" in url:
+                data = json.loads(payload)
+                items = data.get("search", [])[:3]
+                text = " ".join(f"{it.get('label', '')}: {it.get('description', '')}" for it in items)
+                return "Wikidata", text[:25000]
+
+            if "wikipedia.org/api/rest_v1/page/summary" in url:
+                data = json.loads(payload)
+                title = data.get("title") or "Wikipedia"
+                text = data.get("extract") or ""
+                return title, text[:25000]
+
+            if "ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi" in url:
+                data = json.loads(payload)
+                ids = data.get("esearchresult", {}).get("idlist", [])
+                text = f"PubMed candidate ids for claim type {claim_type}: {', '.join(ids[:3])}"
+                return "PubMed", text
+
+            if "export.arxiv.org/api/query" in url:
+                root = ElementTree.fromstring(payload)
+                ns = {"a": "http://www.w3.org/2005/Atom"}
+                entries = root.findall("a:entry", ns)[:3]
+                parts = []
+                for e in entries:
+                    title = (e.findtext("a:title", default="", namespaces=ns) or "").strip()
+                    summary = (e.findtext("a:summary", default="", namespaces=ns) or "").strip()
+                    parts.append(f"{title}. {summary}")
+                return "arXiv", " ".join(parts)[:25000]
+
+            if "api.openalex.org/works" in url:
+                data = json.loads(payload)
+                results = data.get("results", [])[:3]
+                parts = []
+                for r in results:
+                    title = r.get("display_name", "")
+                    abstract = r.get("abstract_inverted_index") or {}
+                    tokens = sorted(((idx, tok) for tok, arr in abstract.items() for idx in arr), key=lambda x: x[0])
+                    abs_text = " ".join(tok for _, tok in tokens[:120])
+                    parts.append(f"{title}. {abs_text}")
+                return "OpenAlex", " ".join(parts)[:25000]
+        except Exception:
+            pass
+
+        cleaned = re.sub(r"\s+", " ", payload or "").strip()
+        return "Typed Source", cleaned[:25000]
+
+    def _local_corpus_extract(self, claim: str) -> Tuple[str, str]:
+        candidates: List[str] = []
+        for p in [
+            SEARCH_CACHE_PATH,
+        ]:
+            if p.exists():
+                try:
+                    candidates.append(p.read_text(encoding="utf-8")[:20000])
+                except Exception:
+                    continue
+        if not candidates:
+            return "Local Corpus", claim
+
+        claim_tokens = set(_tokenize(claim.lower()))
+        best = ""
+        best_score = -1
+        for c in candidates:
+            score = len(claim_tokens & set(_tokenize(c.lower())))
+            if score > best_score:
+                best_score = score
+                best = c
+        return "Local Corpus", re.sub(r"\s+", " ", best).strip()[:25000]
 
     def _dedupe_pages(self, pages: List[Tuple[str, str, str, Dict[str, str]]]) -> List[Tuple[str, str, str, Dict[str, str]]]:
         unique = []

@@ -30,6 +30,7 @@ backend/.env
 backend/.env.*
 !backend/.env.example
 .env
+*.env
 
 # Runtime artifacts / local data
 backend/data/training_data.jsonl

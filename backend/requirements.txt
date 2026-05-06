@@ -4,10 +4,10 @@ pydantic
 httpx
 python-multipart
 python-dotenv
-duckduckgo-search
-ddgs
-beautifulsoup4
-lxml
+spacy
+nltk
+quantulum3
+pint
 numpy
 scikit-learn
 joblib

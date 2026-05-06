@@ -26,6 +26,8 @@ def _verify_claim_process_entry(payload: dict) -> dict:
             document_id=payload.get("document_id", "unknown-document"),
             start_idx=int(payload.get("start_idx", 0)),
             end_idx=int(payload.get("end_idx", 0)),
+            structured_claim=payload.get("structured_claim"),
+            claim_type=payload.get("claim_type"),
             _process_dispatched=True,
         )
     )
@@ -39,7 +41,15 @@ def shutdown_verifier_executors() -> None:
         _process_pool = None
 
 
-async def verify_claim(text: str, document_id: str = "unknown-document", start_idx: int = 0, end_idx: int = 0, _process_dispatched: bool = False) -> Claim:
+async def verify_claim(
+    text: str,
+    document_id: str = "unknown-document",
+    start_idx: int = 0,
+    end_idx: int = 0,
+    structured_claim: dict | None = None,
+    claim_type: str | None = None,
+    _process_dispatched: bool = False,
+) -> Claim:
     """Full multilayer verification flow: Search -> Scrape/Chunk -> Vote -> Calibrated consensus."""
     if PIPELINE_PROCESS_MODE and not _process_dispatched and _process_pool is not None:
         loop = asyncio.get_running_loop()
@@ -51,11 +61,38 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
                 "document_id": document_id,
                 "start_idx": start_idx,
                 "end_idx": end_idx,
+                "structured_claim": structured_claim,
+                "claim_type": claim_type,
             },
         )
         return Claim.model_validate(dump)
 
     logger.info(f"Starting multilayer verification for: {text[:50]}...")
+
+    if (claim_type or "").upper() in {"SUBJECTIVE", "UNVERIFIABLE"}:
+        return Claim(
+            text=text,
+            status="Plausible",
+            label="UNVERIFIABLE",
+            confidence=0.95,
+            evidence=[],
+            start_idx=start_idx,
+            end_idx=end_idx,
+            final_score=0.5,
+            source_reliability_explanation="claim_type excluded from hard verification",
+            proof_trace={
+                "original_claim_text": text,
+                "structured_claim": structured_claim or {},
+                "claim_type": claim_type or "UNVERIFIABLE",
+                "retrieved_evidence": [],
+                "source_urls": [],
+                "comparison_steps": ["claim excluded by type gate"],
+                "scoring_rationale": "subjective or not structurally verifiable",
+                "final_verdict": "UNVERIFIABLE",
+                "confidence": 0.95,
+                "negation_or_temporal_reasoning": {},
+            },
+        )
 
     started = time.perf_counter()
     claim_key = f"{start_idx}:{end_idx}"
@@ -87,10 +124,11 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
         )
 
         if trusted.status in {"Verified", "Hallucination"} and trusted.confidence >= 0.98 and trusted.evidence:
+            trusted_label = "VERIFIED" if trusted.status == "Verified" else "REFUTED"
             short = Claim(
                 text=text,
                 status=trusted.status,
-                label=trusted.status,
+                label=trusted_label,
                 final_score=1.0 if trusted.status == "Verified" else 0.0,
                 confidence=trusted.confidence,
                 evidence=trusted.evidence,
@@ -110,7 +148,13 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
 
         retrieval_started = time.perf_counter()
         retrieval = await asyncio.wait_for(
-            retrieval_pipeline.retrieve(text, document_id=document_id, claim_key=claim_key),
+            retrieval_pipeline.retrieve(
+                text,
+                document_id=document_id,
+                claim_key=claim_key,
+                structured_claim=structured_claim,
+                claim_type=claim_type,
+            ),
             timeout=retrieval_timeout_s,
         )
 
@@ -163,6 +207,8 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
                 retrieval_num_clusters=retrieval.num_clusters,
                 retrieval_independent_clusters=retrieval.independent_clusters,
                 retrieval_cluster_support=retrieval.cluster_support,
+                structured_claim=structured_claim,
+                claim_type=claim_type,
             ),
             timeout=effective_voting_timeout,
         )
@@ -231,7 +277,7 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
                 evidence=[],
                 voter_results={},
                 final_score=0.0,
-                final_label="Plausible",
+                final_label="UNCERTAIN",
                 confidence=0.0,
                 runtime_metadata={
                     "total_runtime_ms": round(elapsed_ms, 2),
@@ -239,12 +285,12 @@ async def verify_claim(text: str, document_id: str = "unknown-document", start_i
                 },
             )
             telemetry.event("claim_timeout", document_id=document_id, claim_key=claim_key, stage="pipeline", message=msg, payload={"runtime_ms": round(elapsed_ms, 2)})
-            return Claim(text=text, status="Plausible", confidence=0.0, evidence=[], start_idx=start_idx, end_idx=end_idx)
+            return Claim(text=text, status="Plausible", label="UNCERTAIN", confidence=0.0, evidence=[], start_idx=start_idx, end_idx=end_idx)
 
     except Exception as e:
         logger.error(f"Verification flow failed: {str(e)}")
         telemetry.event("claim_error", document_id=document_id, claim_key=claim_key, stage="pipeline", message=str(e))
-        return Claim(text=text, status="Plausible", confidence=0.0, evidence=[], start_idx=start_idx, end_idx=end_idx)
+        return Claim(text=text, status="Plausible", label="UNCERTAIN", confidence=0.0, evidence=[], start_idx=start_idx, end_idx=end_idx)
 
 
 async def verify_claims(claims_data: List[dict]) -> List[Claim]:
@@ -258,6 +304,8 @@ async def verify_claims(claims_data: List[dict]) -> List[Claim]:
                     document_id=c.get("document_id", "unknown-document"),
                     start_idx=c["start"],
                     end_idx=c["end"],
+                    structured_claim=c.get("structured_claim"),
+                    claim_type=c.get("claim_type"),
                 )
             )
         return out
@@ -271,6 +319,8 @@ async def verify_claims(claims_data: List[dict]) -> List[Claim]:
                 document_id=c.get("document_id", "unknown-document"),
                 start_idx=c["start"],
                 end_idx=c["end"],
+                structured_claim=c.get("structured_claim"),
+                claim_type=c.get("claim_type"),
             )
 
     tasks = [_run(c) for c in claims_data]
@@ -286,6 +336,8 @@ async def verify_claims_stream(claims_data: List[dict]):
                 document_id=claim_data.get("document_id", "unknown-document"),
                 start_idx=claim_data["start"],
                 end_idx=claim_data["end"],
+                structured_claim=claim_data.get("structured_claim"),
+                claim_type=claim_data.get("claim_type"),
             )
             result.start_idx = claim_data["start"]
             result.end_idx = claim_data["end"]
@@ -301,6 +353,8 @@ async def verify_claims_stream(claims_data: List[dict]):
                 document_id=claim_data.get("document_id", "unknown-document"),
                 start_idx=claim_data["start"],
                 end_idx=claim_data["end"],
+                structured_claim=claim_data.get("structured_claim"),
+                claim_type=claim_data.get("claim_type"),
             )
         return result, claim_data["start"], claim_data["end"]
 

@@ -56,7 +56,7 @@ class RuntimeMetadata(BaseModel):
 
 class Claim(BaseModel):
     text: str
-    status: str  # "Verified", "Plausible", "Hallucination"
+    status: str  # Legacy: Verified|Plausible|Hallucination
     confidence: float
     evidence: List[Evidence]
     start_idx: int = 0
@@ -64,10 +64,11 @@ class Claim(BaseModel):
     voter_scores: Dict[str, float] = Field(default_factory=dict)
     voter_results: Dict[str, VoterResult] = Field(default_factory=dict)
     final_score: float = 0.0
-    label: str = "Plausible"
+    label: str = "PLAUSIBLE"  # New taxonomy: VERIFIED|REFUTED|PLAUSIBLE|CONFLICTING|UNCERTAIN|UNVERIFIABLE
     best_evidence: List[Evidence] = Field(default_factory=list)
     contradicting_evidence: List[Evidence] = Field(default_factory=list)
     source_reliability_explanation: str = ""
+    proof_trace: Dict[str, Any] = Field(default_factory=dict)
     runtime: RuntimeMetadata = Field(default_factory=RuntimeMetadata)
 
 

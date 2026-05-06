@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 from models.schemas import Claim, Evidence, RuntimeMetadata, VoterResult
 from services.voters.heuristic_voter import heuristic_voter
-from services.voters.semantic_voter import semantic_voter
 from services.voters.entity_voter import entity_voter
 from services.voters.consistency_voter import consistency_voter
 from services.voters.deterministic_voter import deterministic_voter
@@ -55,6 +54,8 @@ class VerificationOrchestrator:
         retrieval_num_clusters: int | None = None,
         retrieval_independent_clusters: int | None = None,
         retrieval_cluster_support: float | None = None,
+        structured_claim: Dict[str, Any] | None = None,
+        claim_type: str | None = None,
     ) -> Claim:
         logger.info(f"Running ensemble for: {text[:50]}...")
         telemetry.event("voting_start", document_id=document_id, claim_key=claim_key, stage="voting", message="ensemble voting started", payload={"num_evidence": len(evidence)})
@@ -64,7 +65,6 @@ class VerificationOrchestrator:
         if VOTERS_SERIAL_MODE:
             raw_results = [
                 await self._timed("heuristic", self._run_cpu_voter(heuristic_voter, text, evidence), timeout_s),
-                await self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s),
                 await self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s),
                 await self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s),
                 await self._timed("deterministic", self._run_cpu_voter(deterministic_voter, text, evidence), timeout_s),
@@ -72,7 +72,6 @@ class VerificationOrchestrator:
         else:
             voter_tasks = [
                 asyncio.create_task(self._timed("heuristic", self._run_cpu_voter(heuristic_voter, text, evidence), timeout_s)),
-                asyncio.create_task(self._timed("semantic", semantic_voter.vote(text, evidence), timeout_s)),
                 asyncio.create_task(self._timed("entity", self._run_cpu_voter(entity_voter, text, evidence), timeout_s)),
                 asyncio.create_task(self._timed("consistency", self._run_cpu_voter(consistency_voter, text, evidence), timeout_s)),
                 asyncio.create_task(self._timed("deterministic", self._run_cpu_voter(deterministic_voter, text, evidence), timeout_s)),
@@ -118,7 +117,7 @@ class VerificationOrchestrator:
         else:
             cluster_support = retrieval_cluster_support
 
-        final_score, final_confidence, final_status, normalized_voter_scores = consensus_engine.combine(
+        final_score, final_confidence, _, normalized_voter_scores = consensus_engine.combine(
             voter_results=results,
             source_reliability=avg_reliability,
             cluster_support=cluster_support,
@@ -145,16 +144,16 @@ class VerificationOrchestrator:
         det_meta = det.get("metadata", {}) if isinstance(det.get("metadata", {}), dict) else {}
         det_label = str(det_meta.get("deterministic_label", ""))
 
-        # Honor strict deterministic overrides.
-        if bool(det_meta.get("strong_refute_override", False)):
-            final_status = "Hallucination"
-            final_score = min(final_score, 0.22)
-        elif det_label in {"Uncertain", "Conflicting"} and final_status == "Verified":
-            final_status = "Plausible"
-            final_score = min(final_score, 0.62)
-        elif det_status == "Verified" and mention_ratio >= 0.65:
-            final_status = "Plausible"
-            final_score = min(final_score, 0.60)
+        final_label = self._assemble_verdict(
+            evidence=evidence,
+            det_status=det_status,
+            det_label=det_label,
+            support_ratio=support_ratio,
+            refute_ratio=refute_ratio,
+            mention_ratio=mention_ratio,
+            claim_type=(claim_type or (structured_claim or {}).get("claim_type") or "UNVERIFIABLE"),
+        )
+        final_status = self._legacy_status_from_label(final_label)
 
         final_confidence = min(1.0, max(0.0, max(final_confidence, abs(final_score - 0.5) * 2.0)))
 
@@ -213,7 +212,7 @@ class VerificationOrchestrator:
         return Claim(
             text=text,
             status=final_status,
-            label=final_status,
+            label=final_label,
             final_score=round(final_score, 4),
             confidence=round(final_confidence, 4),
             evidence=evidence,
@@ -235,6 +234,37 @@ class VerificationOrchestrator:
                 f"num_clusters={runtime_metadata['num_clusters']}, "
                 f"independent_clusters={runtime_metadata['independent_clusters']}"
             ),
+            proof_trace={
+                "original_claim_text": text,
+                "structured_claim": structured_claim or {},
+                "claim_type": claim_type or (structured_claim or {}).get("claim_type") or "UNVERIFIABLE",
+                "retrieved_evidence": [
+                    {
+                        "source": ev.source_domain or ev.title,
+                        "url": ev.url,
+                        "text": ev.snippet,
+                        "reliability_score": ev.reliability_score,
+                        "numeric_values": ev.numeric_match,
+                        "provenance": ev.page_quality_signals,
+                    }
+                    for ev in evidence[:8]
+                ],
+                "source_urls": [ev.url for ev in evidence[:8]],
+                "comparison_steps": [
+                    f"deterministic_label={det_label}",
+                    f"support_ratio={support_ratio:.3f}",
+                    f"refute_ratio={refute_ratio:.3f}",
+                    f"mention_ratio={mention_ratio:.3f}",
+                ],
+                "scoring_rationale": f"final_score={round(float(final_score), 4)} from deterministic+consensus bounded fusion",
+                "final_verdict": final_label,
+                "final_label": final_label,
+                "confidence": round(float(final_confidence), 4),
+                "negation_or_temporal_reasoning": {
+                    "negation": bool((structured_claim or {}).get("negation", False)),
+                    "temporal": (claim_type or "").upper() == "TEMPORAL",
+                },
+            },
             runtime=RuntimeMetadata(
                 total_runtime_ms=round(retrieval_runtime_ms + voting_runtime_ms, 2),
                 retrieval_runtime_ms=round(retrieval_runtime_ms, 2),
@@ -245,6 +275,42 @@ class VerificationOrchestrator:
                 external_failures=retrieval_failures or [],
             ),
         )
+
+    @staticmethod
+    def _legacy_status_from_label(label: str) -> str:
+        l = (label or "UNCERTAIN").upper()
+        if l == "VERIFIED":
+            return "Verified"
+        if l == "REFUTED":
+            return "Hallucination"
+        return "Plausible"
+
+    def _assemble_verdict(
+        self,
+        evidence: List[Evidence],
+        det_status: str,
+        det_label: str,
+        support_ratio: float,
+        refute_ratio: float,
+        mention_ratio: float,
+        claim_type: str,
+    ) -> str:
+        ct = (claim_type or "UNVERIFIABLE").upper()
+        if ct in {"SUBJECTIVE", "UNVERIFIABLE"}:
+            return "UNVERIFIABLE"
+        if not evidence:
+            return "UNCERTAIN"
+        if det_status == "Verified" or det_label == "Verified":
+            return "VERIFIED"
+        if det_status == "Hallucination" or det_label == "Hallucination":
+            return "REFUTED"
+        if det_label == "Conflicting" or (support_ratio > 0.15 and refute_ratio > 0.15):
+            return "CONFLICTING"
+        if mention_ratio >= 0.6 and support_ratio < 0.2:
+            return "UNCERTAIN"
+        if support_ratio > refute_ratio:
+            return "PLAUSIBLE"
+        return "UNCERTAIN"
 
     def _cluster_support_score(self, evidence: List[Evidence]) -> float:
         if not evidence:
