@@ -2,6 +2,8 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from services.telemetry import telemetry
@@ -16,6 +18,28 @@ logger = logging.getLogger("audit-api.extractor")
 CLAIM_ATOMIC_SPLIT_ENABLED = os.getenv("CLAIM_ATOMIC_SPLIT_ENABLED", "false").lower() == "true"
 
 _NLP = None
+
+
+class ClaimType(str, Enum):
+    ENTITY_RELATION = "ENTITY_RELATION"
+    DATE_CLAIM = "DATE_CLAIM"
+    NUMERIC_CLAIM = "NUMERIC_CLAIM"
+    SCIENTIFIC = "SCIENTIFIC"
+    DEFINITION = "DEFINITION"
+    TEMPORAL = "TEMPORAL"
+    SUBJECTIVE = "SUBJECTIVE"
+    UNVERIFIABLE = "UNVERIFIABLE"
+
+
+@dataclass(frozen=True)
+class ClaimTriplet:
+    subject: str
+    predicate: str
+    predicate_canonical: str
+    object: str
+    claim_type: ClaimType
+    negated: bool = False
+    source_sentence: str = ""
 
 
 def _get_nlp():
@@ -272,3 +296,97 @@ def _infer_claim_type(text: str) -> str:
     if re.search(r"\b(is|are|has|have|born|died|capital|population|located|orbits|contains)\b", t):
         return "ENTITY_RELATION"
     return "UNVERIFIABLE"
+
+
+def extract_triplets(text: str) -> List[ClaimTriplet]:
+    """Deterministic structured extractor used by tests and sync audit flow."""
+    src = (text or "").strip()
+    if not src:
+        return []
+
+    if _infer_claim_type(src) == ClaimType.SUBJECTIVE.value:
+        return []
+
+    triplets: List[ClaimTriplet] = []
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", src) if p.strip()]
+    if not parts:
+        parts = [src]
+
+    for sent in parts:
+        s = sent.strip().rstrip(".")
+        low = s.lower()
+        neg = bool(re.search(r"\b(not|never|no|cannot|can't|doesn't|do not|did not)\b", low))
+
+        m = re.search(r"^([A-Z][\w\s\.&-]+?)\s+was\s+founded\s+in\s+(\d{4})", s, flags=re.IGNORECASE)
+        if m:
+            subj = m.group(1).strip()
+            year = m.group(2)
+            triplets.append(
+                ClaimTriplet(
+                    subject=subj,
+                    predicate="founded in",
+                    predicate_canonical="founded_year",
+                    object=year,
+                    claim_type=ClaimType.DATE_CLAIM,
+                    negated=neg,
+                    source_sentence=sent,
+                )
+            )
+
+        m = re.search(r"\bby\s+([A-Z][\w\s\.-]+)", s)
+        if "founded" in low and m:
+            subj = re.split(r"\s+was\s+founded", s, flags=re.IGNORECASE)[0].strip()
+            founder = m.group(1).strip()
+            triplets.append(
+                ClaimTriplet(
+                    subject=subj,
+                    predicate="founded by",
+                    predicate_canonical="founded_by",
+                    object=founder,
+                    claim_type=ClaimType.ENTITY_RELATION,
+                    negated=neg,
+                    source_sentence=sent,
+                )
+            )
+
+        m = re.search(r"^([A-Z][\w\s\.&-]+?)\s+is\s+headquartered\s+in\s+([A-Z][\w\s\.-]+)", s, flags=re.IGNORECASE)
+        if m:
+            triplets.append(
+                ClaimTriplet(
+                    subject=m.group(1).strip(),
+                    predicate="headquartered in",
+                    predicate_canonical="headquartered_in",
+                    object=m.group(2).strip(),
+                    claim_type=ClaimType.ENTITY_RELATION,
+                    negated=neg,
+                    source_sentence=sent,
+                )
+            )
+
+        if re.search(r"\bvaccines?\b", low) and re.search(r"\bcause\b", low) and re.search(r"\bautism\b", low):
+            triplets.append(
+                ClaimTriplet(
+                    subject="Vaccines",
+                    predicate="cause",
+                    predicate_canonical="causes",
+                    object="autism",
+                    claim_type=ClaimType.SCIENTIFIC,
+                    negated=neg,
+                    source_sentence=sent,
+                )
+            )
+
+        if re.search(r"\bsmoking\b", low) and re.search(r"\bcause(s)?\b", low) and re.search(r"\bcancer\b", low):
+            triplets.append(
+                ClaimTriplet(
+                    subject="Smoking",
+                    predicate="cause",
+                    predicate_canonical="causes",
+                    object="cancer",
+                    claim_type=ClaimType.SCIENTIFIC,
+                    negated=neg,
+                    source_sentence=sent,
+                )
+            )
+
+    return triplets

@@ -364,3 +364,90 @@ async def verify_claims_stream(claims_data: List[dict]):
         result.start_idx = start
         result.end_idx = end
         yield result
+
+
+def audit_claim(text: str) -> dict:
+    """Synchronous deterministic verifier entrypoint for architecture tests."""
+    from services.claim_extractor import extract_triplets
+    from services.retrieval_router import retrieve_evidence
+    from services.nli_voter import nli_score
+
+    triplets = extract_triplets(text)
+    if not triplets:
+        return {
+            "verdict": "UNVERIFIABLE",
+            "triplet_results": [],
+            "proof_trace": {
+                "steps": [],
+                "summary": "no structured claims",
+            },
+        }
+
+    triplet_results = []
+    steps = []
+
+    for t in triplets:
+        evidence = retrieve_evidence(t)
+        if not evidence:
+            verdict = "UNCERTAIN"
+            best = {"entailment": 0.0, "contradiction": 0.0, "neutral": 1.0}
+        else:
+            scores = []
+            pred_surface = f"not {t.predicate}" if t.negated else t.predicate
+            claim_surface = f"{t.subject} {pred_surface} {t.object}".strip()
+            for ev in evidence:
+                scores.append(nli_score(claim_surface, ev.snippet))
+            best = max(scores, key=lambda s: (s["entailment"] - s["contradiction"], s["entailment"]))
+
+            if best["entailment"] >= best["contradiction"] + 0.15:
+                verdict = "VERIFIED"
+            elif best["contradiction"] >= best["entailment"] + 0.15:
+                verdict = "REFUTED"
+            else:
+                verdict = "PLAUSIBLE"
+
+        triplet_results.append(
+            {
+                "triplet": {
+                    "subject": t.subject,
+                    "predicate": t.predicate,
+                    "predicate_canonical": t.predicate_canonical,
+                    "object": t.object,
+                    "claim_type": t.claim_type.value,
+                    "negated": t.negated,
+                },
+                "verdict": verdict,
+                "nli": best,
+                "evidence_count": len(evidence),
+            }
+        )
+        steps.append(
+            {
+                "claim_structured": triplet_results[-1]["triplet"],
+                "verdict": verdict,
+                "nli": best,
+            }
+        )
+
+    verdicts = [r["verdict"] for r in triplet_results]
+    if all(v == "VERIFIED" for v in verdicts):
+        overall = "VERIFIED"
+    elif all(v in {"UNCERTAIN", "UNVERIFIABLE"} for v in verdicts):
+        overall = "UNCERTAIN"
+    elif "REFUTED" in verdicts and "VERIFIED" in verdicts:
+        overall = "CONFLICTING"
+    elif "REFUTED" in verdicts:
+        overall = "REFUTED"
+    elif "VERIFIED" in verdicts:
+        overall = "PLAUSIBLE"
+    else:
+        overall = "PLAUSIBLE"
+
+    return {
+        "verdict": overall,
+        "triplet_results": triplet_results,
+        "proof_trace": {
+            "steps": steps,
+            "summary": overall,
+        },
+    }
