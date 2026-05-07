@@ -367,7 +367,10 @@ async def verify_claims_stream(claims_data: List[dict]):
 
 
 def audit_claim(text: str) -> dict:
-    """Synchronous deterministic verifier entrypoint for architecture tests."""
+    """Synchronous deterministic verifier entrypoint for architecture tests.
+    
+    CRITICAL RULE: No evidence → UNCERTAIN. Never default to PLAUSIBLE.
+    """
     from services.claim_extractor import extract_triplets
     from services.retrieval_router import retrieve_evidence
     from services.nli_voter import nli_score
@@ -375,7 +378,7 @@ def audit_claim(text: str) -> dict:
     triplets = extract_triplets(text)
     if not triplets:
         return {
-            "verdict": "UNVERIFIABLE",
+            "verdict": "UNCERTAIN",  # FIXED: was UNVERIFIABLE
             "triplet_results": [],
             "proof_trace": {
                 "steps": [],
@@ -388,7 +391,9 @@ def audit_claim(text: str) -> dict:
 
     for t in triplets:
         evidence = retrieve_evidence(t)
-        if not evidence:
+        
+        # FIXED: Hard rule - no evidence → UNCERTAIN always
+        if not evidence or len(evidence) == 0:
             verdict = "UNCERTAIN"
             best = {"entailment": 0.0, "contradiction": 0.0, "neutral": 1.0}
         else:
@@ -439,9 +444,10 @@ def audit_claim(text: str) -> dict:
     elif "REFUTED" in verdicts:
         overall = "REFUTED"
     elif "VERIFIED" in verdicts:
-        overall = "PLAUSIBLE"
+        overall = "VERIFIED"  # FIXED: was PLAUSIBLE when mixed
     else:
-        overall = "PLAUSIBLE"
+        # FIXED: No default PLAUSIBLE - only reach if all are UNCERTAIN
+        overall = "UNCERTAIN"
 
     return {
         "verdict": overall,

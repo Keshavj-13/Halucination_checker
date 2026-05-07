@@ -69,22 +69,69 @@ const DetailPanel = ({ claim, loading = false, status = '', progress = null, res
             )}
 
             <section>
-                <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Voter Scorecard</h4>
-                <div className="grid grid-cols-2 gap-3">
-                    {Object.entries(claim.voter_scores || {}).map(([voter, score]) => (
-                        <div key={voter} className="bg-gray-900/50 p-3 rounded-xl border border-gray-700/50">
-                            <div className="text-[10px] text-gray-500 uppercase font-bold mb-1">{voter}</div>
-                            <div className="flex items-center gap-2">
-                                <div className="h-1.5 flex-1 bg-gray-700 rounded-full overflow-hidden">
+                <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Voter Analysis</h4>
+                <div className="space-y-3">
+                    {claim.voter_results && Object.keys(claim.voter_results).length > 0 ? (
+                        Object.entries(claim.voter_results).map(([voterName, voterResult]) => (
+                            <div key={voterName} className="bg-gray-900/50 p-3 rounded-xl border border-gray-700/50">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="text-[10px] text-cyan-300 uppercase font-bold">{voterName}</div>
+                                    <div className="flex gap-2">
+                                        <span className={`text-xs px-2 py-0.5 rounded font-semibold ${
+                                            voterResult.status === "VERIFIED" ? "bg-green-900 text-green-300" :
+                                            voterResult.status === "REFUTED" ? "bg-red-900 text-red-300" :
+                                            voterResult.status === "PLAUSIBLE" ? "bg-yellow-900 text-yellow-300" :
+                                            "bg-gray-700 text-gray-300"
+                                        }`}>
+                                            {voterResult.status}
+                                        </span>
+                                        <span className="text-xs font-mono text-gray-300">{Math.round((voterResult.confidence ?? 0) * 100)}%</span>
+                                    </div>
+                                </div>
+                                <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden mb-2">
                                     <div
-                                        className={`h-full ${score > 0.7 ? 'bg-green-500' : score > 0.3 ? 'bg-yellow-500' : 'bg-red-500'}`}
-                                        style={{ width: `${score * 100}%` }}
+                                        className={`h-full ${(voterResult.confidence ?? 0) > 0.7 ? 'bg-green-500' : (voterResult.confidence ?? 0) > 0.3 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                        style={{ width: `${(voterResult.confidence ?? 0) * 100}%` }}
                                     />
                                 </div>
-                                <span className="text-xs font-mono text-gray-300">{Math.round(score * 100)}%</span>
+                                {voterResult.reasoning && (
+                                    <p className="text-xs text-gray-400 mb-2">"{voterResult.reasoning}"</p>
+                                )}
+                                {voterResult.metadata && Object.keys(voterResult.metadata).length > 0 && (
+                                    <div className="text-[10px] text-gray-500 bg-gray-800/50 p-2 rounded border border-gray-700/30">
+                                        {Object.entries(voterResult.metadata).map(([key, value]) => (
+                                            <div key={key} className="flex justify-between gap-2">
+                                                <span className="text-gray-400">{key}:</span>
+                                                <span className="text-gray-300 font-mono">
+                                                    {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
+                        ))
+                    ) : claim.voter_scores && Object.keys(claim.voter_scores).length > 0 ? (
+                        // Fallback to voter_scores for backward compatibility
+                        <div className="grid grid-cols-2 gap-3">
+                            {Object.entries(claim.voter_scores || {}).map(([voter, score]) => (
+                                <div key={voter} className="bg-gray-900/50 p-3 rounded-xl border border-gray-700/50">
+                                    <div className="text-[10px] text-gray-500 uppercase font-bold mb-1">{voter}</div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="h-1.5 flex-1 bg-gray-700 rounded-full overflow-hidden">
+                                            <div
+                                                className={`h-full ${score > 0.7 ? 'bg-green-500' : score > 0.3 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                                style={{ width: `${score * 100}%` }}
+                                            />
+                                        </div>
+                                        <span className="text-xs font-mono text-gray-300">{Math.round(score * 100)}%</span>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    ))}
+                    ) : (
+                        <p className="text-xs text-gray-500 italic">No voter analysis available</p>
+                    )}
                 </div>
             </section>
 
@@ -107,13 +154,43 @@ const DetailPanel = ({ claim, loading = false, status = '', progress = null, res
                                     >
                                         {ev.title}
                                     </a>
-                                    <span className="bg-blue-900/30 text-blue-400 text-[10px] px-2 py-0.5 rounded-full border border-blue-800/50">
-                                        Reliability: {Math.round(ev.reliability_score * 100)}%
-                                    </span>
+                                    <div className="flex gap-2">
+                                        {ev.reliability_score !== undefined && (
+                                            <span className="bg-blue-900/30 text-blue-400 text-[10px] px-2 py-0.5 rounded-full border border-blue-800/50">
+                                                Reliability: {Math.round(ev.reliability_score * 100)}%
+                                            </span>
+                                        )}
+                                        {ev.support && (
+                                            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                                                ev.support === "supporting" 
+                                                    ? "bg-green-900/30 text-green-400 border-green-800/50"
+                                                    : ev.support === "contradicting"
+                                                    ? "bg-red-900/30 text-red-400 border-red-800/50"
+                                                    : "bg-gray-700/30 text-gray-400 border-gray-600/50"
+                                            }`}>
+                                                {ev.support}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                                 <p className="text-gray-400 text-sm leading-relaxed italic">
                                     "{ev.snippet.length > 200 ? ev.snippet.substring(0, 200) + '...' : ev.snippet}"
                                 </p>
+                                
+                                {/* Page Quality Signals */}
+                                {ev.page_quality_signals && Object.keys(ev.page_quality_signals).length > 0 && (
+                                    <div className="mt-2 text-[10px] text-gray-500 bg-gray-800/50 p-2 rounded border border-gray-700/30 space-y-1">
+                                        {ev.page_quality_signals.editable_by_public !== undefined && (
+                                            <div><span className="text-gray-400">Public Edit:</span> {ev.page_quality_signals.editable_by_public ? "Yes" : "No"}</div>
+                                        )}
+                                        {ev.page_quality_signals.editor_expertise_est !== undefined && (
+                                            <div><span className="text-gray-400">Expert Level:</span> {Math.round(ev.page_quality_signals.editor_expertise_est * 100)}%</div>
+                                        )}
+                                        {ev.page_quality_signals.open_editability_score !== undefined && (
+                                            <div><span className="text-gray-400">Editability:</span> {Math.round(ev.page_quality_signals.open_editability_score * 100)}%</div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         ))
                     )}

@@ -125,6 +125,7 @@ class AuditResponse(BaseModel):
     total: int
     verified: int
     plausible: int
+    uncertain: int
     hallucinations: int
     claims: List[Claim]
 

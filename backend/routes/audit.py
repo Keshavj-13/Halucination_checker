@@ -66,10 +66,19 @@ async def run_audit(body: AuditRequest, request: Request):
     verified_claims = await verify_claims(claims_data)
     telemetry.event("claims_verified", document_id=document_id, stage="verify", message=f"verified {len(verified_claims)} claims", payload={"num_claims": len(verified_claims)})
     
-    # 3. Calculate Stats
-    verified = len([c for c in verified_claims if c.status in {"VERIFIED", "Verified"}])
-    plausible = len([c for c in verified_claims if c.status in {"PLAUSIBLE", "Plausible", "UNCERTAIN", "CONFLICTING"}])
-    hallucinations = len([c for c in verified_claims if c.status in {"REFUTED", "Hallucination"}])
+    # 3. Calculate Stats (use label-aware counting so UNCERTAIN isn't miscategorized)
+    # prefer `label` (new taxonomy) when present, else fall back to legacy `status`
+    def _label_of(c):
+        try:
+            return (c.label or "").upper()
+        except Exception:
+            return (c.status or "").upper()
+
+    labels = [_label_of(c) for c in verified_claims]
+    verified = sum(1 for l in labels if l == "VERIFIED")
+    hallucinations = sum(1 for l in labels if l == "REFUTED")
+    plausible = sum(1 for l in labels if l == "PLAUSIBLE")
+    uncertain = sum(1 for l in labels if l in {"UNCERTAIN", "UNVERIFIABLE", "CONFLICTING"})
     telemetry.event(
         "audit_request_done",
         document_id=document_id,
@@ -79,6 +88,7 @@ async def run_audit(body: AuditRequest, request: Request):
             "total": len(verified_claims),
             "verified": verified,
             "plausible": plausible,
+            "uncertain": uncertain,
             "hallucinations": hallucinations,
             "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
         },
@@ -89,6 +99,7 @@ async def run_audit(body: AuditRequest, request: Request):
         total=len(verified_claims),
         verified=verified,
         plausible=plausible,
+        uncertain=uncertain,
         hallucinations=hallucinations,
         claims=verified_claims
     )

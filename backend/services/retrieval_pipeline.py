@@ -51,14 +51,14 @@ SUPPORT_PATTERNS = re.compile(
 )
 
 CLAIM_TYPE_TO_SOURCES: Dict[str, List[str]] = {
-    "ENTITY_RELATION": ["wikidata", "wikipedia", "local"],
-    "DATE_CLAIM": ["wikidata", "wikipedia", "local"],
-    "NUMERIC_CLAIM": ["wikidata", "wikipedia", "local"],
-    "SCIENTIFIC": ["pubmed", "arxiv", "openalex", "local"],
-    "DEFINITION": ["wikipedia", "wikidata", "local"],
-    "TEMPORAL": ["wikidata", "wikipedia", "local"],
-    "SUBJECTIVE": ["local"],
-    "UNVERIFIABLE": ["local"],
+    "ENTITY_RELATION": ["wikidata", "wikipedia"],
+    "DATE_CLAIM": ["wikidata", "wikipedia"],
+    "NUMERIC_CLAIM": ["wikidata", "wikipedia"],
+    "SCIENTIFIC": ["pubmed", "arxiv", "openalex"],
+    "DEFINITION": ["wikipedia", "wikidata"],
+    "TEMPORAL": ["wikidata", "wikipedia"],
+    "SUBJECTIVE": [],  # Disabled: Local corpus fallback causes fake evidence
+    "UNVERIFIABLE": [],  # Disabled: Local corpus fallback causes fake evidence
 }
 
 
@@ -226,7 +226,7 @@ class RetrievalPipeline:
 
         typed_claim = (claim_type or (structured_claim or {}).get("claim_type") or "UNVERIFIABLE").upper()
         t0 = time.perf_counter()
-        urls = self._build_typed_urls(claim, typed_claim)
+        urls = self._build_typed_urls(claim, typed_claim, structured_claim=structured_claim)
         telemetry.event(
             "retrieval_search_done",
             document_id=document_id,
@@ -385,17 +385,45 @@ class RetrievalPipeline:
             cluster_support=summary.support_score,
         )
 
-    def _build_typed_urls(self, claim: str, claim_type: str) -> List[str]:
-        key = stable_hash(f"typed::{claim_type}::{claim}")
+    def _build_typed_urls(self, claim: str, claim_type: str, structured_claim: Dict[str, Any] | None = None) -> List[str]:
+        """Build API URLs for retrieval.
+        
+        CRITICAL FIX: Extract only the subject/entity from structured_claim, NOT the full sentence.
+        - ENTITY_RELATION/DATE_CLAIM: query = subject only
+        - SCIENTIFIC: query = subject + object
+        - Fallback to tokenized claim if no structured_claim available
+        - NO LOCAL CORPUS fallback (disabled to prevent fake evidence)
+        """
+        # FIXED: Use subject from structured claim instead of full claim text
+        query_text = claim
+        if structured_claim:
+            subject = structured_claim.get("subject", "")
+            obj = structured_claim.get("object", "")
+            ct = claim_type.upper()
+            
+            if ct in {"ENTITY_RELATION", "DATE_CLAIM", "NUMERIC_CLAIM", "TEMPORAL", "DEFINITION"}:
+                # Query with subject only
+                query_text = subject if subject else claim
+            elif ct == "SCIENTIFIC":
+                # Query with subject + object for scientific claims
+                query_text = f"{subject} {obj}".strip() if subject or obj else claim
+        
+        key = stable_hash(f"typed::{claim_type}::{query_text}")
         cached = self.search_cache.get(key)
         if cached:
             return cached[:MAX_SEARCH_RESULTS]
 
-        q = "+".join(_tokenize(claim.lower())[:12])
-        sources = CLAIM_TYPE_TO_SOURCES.get(claim_type, ["local"])
+        q = "+".join(_tokenize(query_text.lower())[:12])  # Now uses subject-only query
+        sources = CLAIM_TYPE_TO_SOURCES.get(claim_type, [])  # FIXED: Empty list, no local fallback
+        if not sources:  # If no sources defined, only try wikidata/wikipedia
+            sources = ["wikidata", "wikipedia"]
+        
         urls: List[str] = []
         for src in sources:
-            if src == "wikidata":
+            # CRITICAL: Skip local corpus entirely
+            if src == "local":
+                continue
+            elif src == "wikidata":
                 urls.append(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=en&search={q}")
             elif src == "wikipedia":
                 urls.append(f"https://en.wikipedia.org/api/rest_v1/page/summary/{q}")
@@ -405,8 +433,6 @@ class RetrievalPipeline:
                 urls.append(f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results=3")
             elif src == "openalex":
                 urls.append(f"https://api.openalex.org/works?search={q}&per-page=3")
-            elif src == "local":
-                urls.append(f"local://corpus?query={q}")
 
         deduped = []
         seen = set()

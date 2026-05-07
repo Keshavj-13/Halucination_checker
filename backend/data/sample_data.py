@@ -95,5 +95,6 @@ SAMPLE_RESPONSE = AuditResponse(
     total=5,
     verified=2,
     plausible=1,
+    uncertain=0,
     hallucinations=2,
 )

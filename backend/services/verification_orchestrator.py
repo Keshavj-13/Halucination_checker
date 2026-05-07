@@ -24,11 +24,29 @@ class VerificationOrchestrator:
         self._cpu_voter_pool = ThreadPoolExecutor(max_workers=VOTER_CPU_WORKERS)
 
     async def _run_cpu_voter(self, voter, text: str, evidence: List[Evidence]):
+        """Run a voter in a thread pool and support both sync and async `vote` methods.
+
+        The worker executed in the thread will call the voter appropriately:
+        - If `voter.vote` is a coroutine function, create a fresh event loop in the thread via asyncio.run()
+        - Otherwise call the synchronous function directly
+
+        This avoids awaiting non-awaitable results or attempting to asyncio.run() sync functions.
+        """
+        import inspect
+
+        def _call_voter(voter_obj, txt, ev):
+            # If voter.vote is async, run it with asyncio.run in this worker thread
+            try:
+                if inspect.iscoroutinefunction(getattr(voter_obj, "vote", None)):
+                    return asyncio.run(voter_obj.vote(txt, ev))
+                else:
+                    return voter_obj.vote(txt, ev)
+            except Exception:
+                # Bubble up the exception to the caller which will handle/log it
+                raise
+
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._cpu_voter_pool,
-            lambda: asyncio.run(voter.vote(text, evidence)),
-        )
+        return await loop.run_in_executor(self._cpu_voter_pool, _call_voter, voter, text, evidence)
 
     async def _timed(self, name: str, coro, timeout_s: float):
         started = asyncio.get_event_loop().time()
@@ -256,6 +274,7 @@ class VerificationOrchestrator:
                     f"refute_ratio={refute_ratio:.3f}",
                     f"mention_ratio={mention_ratio:.3f}",
                 ],
+                "voter_results": {name: {"status": (res.get("status") if isinstance(res, dict) else getattr(res, 'status', None)), "confidence": float(res.get("confidence", 0.0) if isinstance(res, dict) else getattr(res, 'confidence', 0.0)), "reasoning": (res.get("reasoning") if isinstance(res, dict) else getattr(res, 'reasoning', None)), "metadata": (res.get("metadata", {}) if isinstance(res, dict) else getattr(res, 'metadata', {}))} for name, res in results.items()},
                 "scoring_rationale": f"final_score={round(float(final_score), 4)} from deterministic+consensus bounded fusion",
                 "final_verdict": final_label,
                 "final_label": final_label,
