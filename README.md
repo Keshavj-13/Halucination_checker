@@ -1,5 +1,9 @@
 # SAMSA Checker (Hallucination Audit System)
 
+## About
+
+SAMSA Checker helps evaluate whether claims in user-provided documents are supported by verifiable evidence. It combines deterministic claim analysis, web retrieval, evidence scoring, and multi-voter verification to label claims as `Verified`, `Plausible`, or `Hallucination`.
+
 Full-stack document hallucination auditing system with:
 
 - claim extraction
@@ -9,6 +13,15 @@ Full-stack document hallucination auditing system with:
 - document upload text extraction
 - local SQLite accounts + audit history
 - authenticated chat history API
+
+
+## Project Governance
+
+- License: GNU General Public License v3.0 (or later) — see `LICENSE`
+- Contributing guide: `CONTRIBUTING.md`
+- Code of conduct: `CODE_OF_CONDUCT.md`
+- Security policy: `SECURITY.md`
+- Changelog: `CHANGELOG.md`
 
 ## Tech Stack
 
@@ -490,4 +503,3 @@ npm run build
 - **Chat returns fallback reply:** LLM provider unavailable or rate limited.
 - **Slow runs/timeouts:** lower concurrency and tighten retrieval limits in `.env`.
 - **Port busy:** startup scripts auto-select fallback backend port.
-
