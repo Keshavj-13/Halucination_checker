@@ -10,6 +10,15 @@ Full-stack document hallucination auditing system with:
 - local SQLite accounts + audit history
 - authenticated chat history API
 
+
+## Project Governance
+
+- License: GNU General Public License v3.0 (or later) — see `LICENSE`
+- Contributing guide: `CONTRIBUTING.md`
+- Code of conduct: `CODE_OF_CONDUCT.md`
+- Security policy: `SECURITY.md`
+- Changelog: `CHANGELOG.md`
+
 ## Tech Stack
 
 - **Backend:** FastAPI
