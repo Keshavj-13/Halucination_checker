@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to Halucination_checker.
+Thanks for contributing to Hallucination_checker.
 
 ## Getting Started
 
